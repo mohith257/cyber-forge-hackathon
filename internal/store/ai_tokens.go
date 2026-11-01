@@ -19,7 +19,7 @@ func (s Scope) ReserveMeteredAI(ctx context.Context, calls int, tokens int64, a 
 		if e := tx.QueryRow(ctx, "SELECT coalesce(sum(coalesce(total_tokens,reserved_tokens)),0) FROM ai_requests WHERE tenant_id=$1 AND created_at>=date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'", s.Tenant).Scan(&used); e != nil {
 			return e
 		}
-		if calls < 1 || calls > 100 || tokens < AIReservation || used > tokens-AIReservation {
+		if calls < 1 || calls > 10000 || tokens < AIReservation || used > tokens-AIReservation {
 			return ErrAIBudget
 		}
 		tag, e := tx.Exec(ctx, `INSERT INTO ai_usage(tenant_id,day,calls)VALUES($1,(now() AT TIME ZONE 'UTC')::date,1) ON CONFLICT(tenant_id,day)DO UPDATE SET calls=ai_usage.calls+1 WHERE ai_usage.calls<$2`, s.Tenant, calls)
