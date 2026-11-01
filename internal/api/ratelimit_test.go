@@ -84,6 +84,26 @@ func TestRateLimits(t *testing.T) {
 		t.Fatal("second run not limited", c)
 	}
 
+	// AI calls have their own bucket: exhausted runs don't block drafts, and vice versa
+	aiLim, _ := New(&API{Limits: &Limits{RunPerKey: Rate{PerSecond: 0.01, Burst: 1}, AIPerKey: Rate{PerSecond: 0.01, Burst: 2}}, Authenticate: func(context.Context, string) (string, error) { return "tenant-a", nil }})
+	post := func(path string) int {
+		r := httptest.NewRequest("POST", path, nil)
+		r.RemoteAddr = "10.0.0.6:1"
+		r.Header.Set("Authorization", "Bearer "+keyA)
+		w := httptest.NewRecorder()
+		func() { defer func() { recover() }(); aiLim.ServeHTTP(w, r) }()
+		return w.Code
+	}
+	if post("/connectors/x/run") == 429 || post("/connectors/x/run") != 429 {
+		t.Fatal("run bucket")
+	}
+	if post("/ai/draft") == 429 || post("/siem/ask") == 429 {
+		t.Fatal("AI calls blocked by the run bucket")
+	}
+	if post("/ai/draft") != 429 {
+		t.Fatal("AI bucket not enforced")
+	}
+
 	// verified keys share a separate, larger per-IP backstop
 	vip, _ := New(&API{Limits: &Limits{VerifiedIP: Rate{PerSecond: 1, Burst: 5}}, Authenticate: func(context.Context, string) (string, error) { return "tenant-a", nil }})
 	blocked := 0

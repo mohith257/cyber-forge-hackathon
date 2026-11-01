@@ -26,6 +26,7 @@ type Limits struct {
 	FailedPerIP Rate // failed authentications only (key guessing)
 	PerKey      Rate // every authenticated request, per API key
 	RunPerKey   Rate // POST /connectors/{id}/run|test: these call the vendor
+	AIPerKey    Rate // POST /ai/draft, /siem/ask, /intel/research: cost is capped by the daily AI budget
 }
 
 var DefaultLimits = Limits{
@@ -34,6 +35,7 @@ var DefaultLimits = Limits{
 	FailedPerIP: Rate{PerSecond: 0.2, Burst: 10},  // 10 misses, then one per 5 s
 	PerKey:      Rate{PerSecond: 10, Burst: 40},
 	RunPerKey:   Rate{PerSecond: 0.2, Burst: 6}, // 6 runs at once, then one per 5 s
+	AIPerKey:    Rate{PerSecond: 0.5, Burst: 20}, // 20 drafts at once, then one per 2 s
 }
 
 type bucket struct {

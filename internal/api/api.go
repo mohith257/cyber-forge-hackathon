@@ -296,8 +296,14 @@ func New(a *API) (http.Handler, error) {
 		// runs/tests call the vendor and AI drafts call the model: both are costly
 		// (POST /configs/{id}/test previews a draft against the real vendor too)
 		// GET /intel/map calls Wikidata on every cache miss: outbound, so costly too
-		if r.Method == http.MethodGet && r.URL.Path == "/intel/map" || r.Method == http.MethodPost && (r.URL.Path == "/ai/draft" || r.URL.Path == "/siem/ask" || r.URL.Path == "/intel/research" || (strings.HasPrefix(r.URL.Path, "/connectors/") || strings.HasPrefix(r.URL.Path, "/configs/")) &&
-			(strings.HasSuffix(r.URL.Path, "/run") || strings.HasSuffix(r.URL.Path, "/test") || strings.HasSuffix(r.URL.Path, "/repair"))) {
+		// AI calls get their own bucket so drafting isn't starved by runs/tests.
+		if r.Method == http.MethodPost && (r.URL.Path == "/ai/draft" || r.URL.Path == "/siem/ask" || r.URL.Path == "/intel/research") {
+			if ok, retry := lim.take("ai:"+key, rl.AIPerKey); !ok {
+				limited(w, retry)
+				return
+			}
+		} else if r.Method == http.MethodGet && r.URL.Path == "/intel/map" || r.Method == http.MethodPost && (strings.HasPrefix(r.URL.Path, "/connectors/") || strings.HasPrefix(r.URL.Path, "/configs/")) &&
+			(strings.HasSuffix(r.URL.Path, "/run") || strings.HasSuffix(r.URL.Path, "/test") || strings.HasSuffix(r.URL.Path, "/repair")) {
 			if ok, retry := lim.take("run:"+key, rl.RunPerKey); !ok {
 				limited(w, retry)
 				return

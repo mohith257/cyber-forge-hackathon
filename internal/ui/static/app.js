@@ -1088,7 +1088,8 @@ function renderWizard(v) {
       say('Couldn\'t find an exact, verifiable setup for ' + W.product.trim() + '. Give me the vendor\'s API documentation link or its OpenAPI spec below and I\'ll build the template from that.', true);
     }
     else if (r.status === 422) { say((r.data && r.data.detail) || 'The public references do not support a usable setup. Supply focused API docs or fill in manually.', true); W.pasteIssues = (r.data && r.data.issues) || []; }
-    else if (r.status === 429) say('Too many drafts in a row. Wait a few seconds.', true);
+    else if (r.status === 429 && r.data && r.data.error === 'ai_daily_limit_reached') say('Daily AI limit for this account reached. Use "Fill in manually" or try tomorrow.', true);
+    else if (r.status === 429) say('Too many AI requests in a row. Wait a few seconds.', true);
     else say('AI request failed: ' + ((r.data && (r.data.detail || r.data.error)) || 'HTTP ' + r.status), true);
     re();
   }) }, W.draft ? 'Draft again' : 'Set it up');
