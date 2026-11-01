@@ -778,7 +778,7 @@ const num = (x) => (x === '' || x === undefined || x === null || isNaN(+x) ? und
 function blank() {
   return { id: '', name: '', vendor: '', keep: {}, url: '', timeout: '20', ports: '', params: [], headers: [['Accept', 'application/json']],
     auth: { type: 'none', secret: '', header: '', username: '', token_url: '', client_id: '', scopes: '', extra: [], tpl: [] },
-    items_path: '', pag: { type: 'none', page_param: 'page', start_page: '1', offset_param: 'offset', size_param: 'limit', page_size: '100', cursor_param: '', cursor_path: '' },
+    items_path: '', pag: { type: 'none', page_param: 'page', start_page: '1', offset_param: 'offset', size_param: 'limit', page_size: '100', cursor_param: '', cursor_path: '', next_url_path: '' },
     filter: [], cls: 'user_inventory', activity: '', rows: [{ o: 'user.uid', src: 'path', val: 'id', tf: 'string', req: true, lookup: '', def: '', fmt: '', tz: '' }],
     sched: { enabled: false, interval: '3600' }, notifications: { present: false, enabled: false, failure_threshold: '3', cooldown_seconds: '3600' }, limits: { max_pages: '10', max_records: '1000', max_response_bytes: '1048576', max_run_seconds: '60' },
     retry: { max_attempts: '4', base_delay_ms: '1000', max_retry_after_seconds: '60' } };
@@ -825,6 +825,7 @@ function serialize(f) {
   if (P.type === 'page') { put('page_param'); put('start_page', 1); put('size_param'); put('page_size', 1); }
   if (P.type === 'offset') { put('offset_param'); put('size_param'); put('page_size', 1); }
   if (P.type === 'cursor') { put('cursor_param'); put('cursor_path'); put('size_param'); put('page_size', 1); }
+  if (P.type === 'next_url') { put('next_url_path'); put('size_param'); put('page_size', 1); }
   const request = { method: 'GET', url: f.url.trim() };
   if (num(f.timeout)) request.timeout_seconds = num(f.timeout);
   const ps = obj(f.params), hs = obj(f.headers);
@@ -929,7 +930,8 @@ function renderBuilder(v) {
 
   // pagination
   const P = f.pag, pt = P.type;
-  const pagBody = [field('Type', sel(P, 'type', [['none'], ['page'], ['offset'], ['link', 'link (HTTP Link header)'], ['cursor']]))];
+  const pagBody = [field('Type', sel(P, 'type', [['none'], ['page'], ['offset'], ['link', 'link (HTTP Link header)'], ['cursor'], ['next_url', 'next_url (URL in body)']]))];
+  if (pt === 'next_url') pagBody.push(h('div', { class: 'grid3' }, field('Next URL path', inp(P, 'next_url_path', { placeholder: '/links/next' })), field('Size param', inp(P, 'size_param')), field('Page size', inp(P, 'page_size'))));
   if (pt === 'page') pagBody.push(h('div', { class: 'grid4' }, field('Page param', inp(P, 'page_param')), field('Start page', inp(P, 'start_page')), field('Size param', inp(P, 'size_param')), field('Page size', inp(P, 'page_size'))));
   if (pt === 'offset') pagBody.push(h('div', { class: 'grid3' }, field('Offset param', inp(P, 'offset_param')), field('Size param', inp(P, 'size_param')), field('Page size', inp(P, 'page_size'))));
   if (pt === 'cursor') pagBody.push(h('div', { class: 'grid4' }, field('Cursor param', inp(P, 'cursor_param')), field('Cursor path', inp(P, 'cursor_path', { placeholder: 'meta.next' })), field('Size param', inp(P, 'size_param')), field('Page size', inp(P, 'page_size'))));

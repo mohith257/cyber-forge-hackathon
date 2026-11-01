@@ -120,8 +120,8 @@ func run() error {
 		model := os.Getenv("CB_AI_MODEL")
 		limit, err := strconv.Atoi(os.Getenv("CB_AI_DAILY_LIMIT"))
 		tokens, err2 := strconv.ParseInt(os.Getenv("CB_AI_DAILY_TOKEN_LIMIT"), 10, 64)
-		if model == "" || err != nil || limit < 1 || limit > 100 || err2 != nil || tokens < 40000 || tokens > 100000000 {
-			return errors.New("CB_AI_PROVIDER set: CB_AI_MODEL, CB_AI_DAILY_LIMIT (1-100) and CB_AI_DAILY_TOKEN_LIMIT (40000-100000000) are required")
+		if model == "" || err != nil || limit < 1 || limit > 10000 || err2 != nil || tokens < 40000 || tokens > 100000000 {
+			return errors.New("CB_AI_PROVIDER set: CB_AI_MODEL, CB_AI_DAILY_LIMIT (1-10000) and CB_AI_DAILY_TOKEN_LIMIT (40000-100000000) are required")
 		}
 		switch provider {
 		case "bedrock":
