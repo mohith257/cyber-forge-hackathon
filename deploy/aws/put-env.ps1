@@ -39,9 +39,9 @@ $settings = [ordered]@{
   CB_DOC_RENDERER         = 'off'
   CB_AI_DAILY_LIMIT       = From-Local 'CB_AI_DAILY_LIMIT'
   CB_AI_DAILY_TOKEN_LIMIT = From-Local 'CB_AI_DAILY_TOKEN_LIMIT'
-  # AI is metered: production enables it only for the accounts that use SIEM
-  CB_AI_ENABLED_TENANTS   = From-Local 'CB_SIEM_ENABLED_TENANTS'
-  CB_SIEM_ENABLED_TENANTS = From-Local 'CB_SIEM_ENABLED_TENANTS'
+  # AI + SIEM insights for every account (max 25 via the sign-up cap)
+  CB_AI_ENABLED_TENANTS   = '*'   # every account; spend bounded by the daily request/token budget
+  CB_SIEM_ENABLED_TENANTS = '*'
   CB_TUNNEL_TOKEN         = From-Local 'CB_TUNNEL_TOKEN'
   CB_OPENSEARCH_IMAGE     = From-Local 'CB_OPENSEARCH_IMAGE'
   CB_NGINX_IMAGE          = 'nginx:1.27.3-alpine'

@@ -19,8 +19,12 @@ func SIEM(getenv func(string) string, model *ai.Client) (*api.SIEM, error) {
 		return nil, nil
 	}
 	tenants := map[string]bool{}
+	all := enabled == "*" // every account
 	for _, t := range strings.Split(enabled, ",") {
 		t = strings.TrimSpace(t)
+		if all {
+			break
+		}
 		if !config.ValidID(t) {
 			return nil, errors.New("invalid SIEM tenant allowlist")
 		}
@@ -41,7 +45,7 @@ func SIEM(getenv func(string) string, model *ai.Client) (*api.SIEM, error) {
 	if e != nil {
 		return nil, errors.New("invalid OpenSearch configuration")
 	}
-	s := &api.SIEM{Search: search, EnabledTenants: tenants}
+	s := &api.SIEM{Search: search, EnabledTenants: tenants, AllTenants: all}
 	// no AI provider: findings still work, "explain" answers siem_disabled
 	if model != nil && model.ModelID() != "" {
 		s.Provider, s.DailyCalls, s.DailyTokens = model, model.DailyLimit, model.TokenLimit

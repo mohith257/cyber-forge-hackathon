@@ -18,6 +18,14 @@ func TestSIEMOptInAndConfiguration(t *testing.T) {
 	if e != nil || !s.EnabledTenants["tenant-a"] || s.EnabledTenants["tenant-b"] || s.Provider == nil || s.DailyCalls != 5 || s.DailyTokens != 50000 {
 		t.Fatal(e)
 	}
+	values["CB_SIEM_ENABLED_TENANTS"] = "*"
+	if all, e := SIEM(get, model); e != nil || !all.AllTenants || len(all.EnabledTenants) != 0 {
+		t.Fatal("* must enable every account", e)
+	}
+	values["CB_SIEM_ENABLED_TENANTS"] = "tenant-a"
+	if s.AllTenants {
+		t.Fatal("a list must not enable every account")
+	}
 	if s, e = SIEM(get, nil); e != nil || s.Provider != nil {
 		t.Fatal("explanations enabled without an AI provider")
 	}

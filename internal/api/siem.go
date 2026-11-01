@@ -28,6 +28,7 @@ type SIEM struct {
 	Search         insights.Search
 	Provider       Explainer
 	EnabledTenants map[string]bool
+	AllTenants     bool // CB_SIEM_ENABLED_TENANTS="*"
 	DailyTokens    int64
 	DailyCalls     int
 	mu             sync.Mutex
@@ -56,7 +57,7 @@ func (s *SIEM) release(tenant string) {
 func runReference(connector string) string { return "/runs?connector=" + url.QueryEscape(connector) }
 
 func (a *API) siemEnabled(tenant string) bool {
-	return a.SIEM != nil && a.SIEM.Search != nil && a.SIEM.EnabledTenants[tenant]
+	return a.SIEM != nil && a.SIEM.Search != nil && (a.SIEM.AllTenants || a.SIEM.EnabledTenants[tenant])
 }
 func siemFailure(w http.ResponseWriter, err error) {
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrBusy) {

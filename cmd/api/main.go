@@ -167,7 +167,8 @@ func run() error {
 			slog.Info("docs renderer", "enabled", true)
 		}
 	}
-	if raw := strings.TrimSpace(os.Getenv("CB_AI_ENABLED_TENANTS")); raw != "" {
+	// "*" = every account (spend still bounded by the daily request/token budget)
+	if raw := strings.TrimSpace(os.Getenv("CB_AI_ENABLED_TENANTS")); raw != "" && raw != "*" {
 		drafter.Tenants = map[string]bool{}
 		for _, t := range strings.Split(raw, ",") {
 			drafter.Tenants[strings.TrimSpace(t)] = true
