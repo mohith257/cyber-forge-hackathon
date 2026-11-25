@@ -8,14 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
-	"io"
-	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 )
 
 var ErrDocumentation = errors.New("official_documentation_required: provide public API documentation URLs, the requested dataset and scope; no endpoint or mapping will be guessed")
@@ -68,122 +64,33 @@ func safeQuery(u *url.URL) bool {
 	return true
 }
 
-// dropTracking removes analytics parameters search results append.
-func dropTracking(u *url.URL) {
-	q := u.Query()
-	for k := range q {
-		l := strings.ToLower(k)
-		if strings.HasPrefix(l, "utm_") || l == "gclid" || l == "fbclid" || l == "srsltid" || l == "ref" || l == "source" {
-			q.Del(k)
-		}
-	}
-	u.RawQuery = q.Encode()
-}
-
-var scriptTags = regexp.MustCompile(`(?is)<(?:script|style)\b[^>]*>.*?</(?:script|style)>`)
-var markupTags = regexp.MustCompile(`<[^>]+>`)
-var documentationSlots = make(chan struct{}, 4)
-
-const maxDocumentationBytes = 8 << 20
-
 // maxDocumentationText bounds the excerpt sent to the model per reference.
-// API references put auth, paging and response examples far down the page;
-// 6000 characters cut them off, so evidence checks failed on real vendors.
+// The agent keeps the whole page when it fits, otherwise the sections that
+// carry API facts (route, auth, pagination, JSON examples), not the page head.
 const maxDocumentationText = 40000
 
+// maxVerifyText: claim checks read the whole page, never a selected excerpt.
+const maxVerifyText = 2 << 20
+
 func compact(s string) string { return strings.Join(strings.Fields(s), " ") }
-func readPublicDocumentation(ctx context.Context, raw string) (string, error) {
+
+// fetchDoc reads one public reference through the Rust agent (agent/), or the
+// FetchDocumentation test seam.
+func (c *Client) fetchDoc(ctx context.Context, raw string, maxChars int) (string, error) {
+	if c.FetchDocumentation != nil {
+		return c.FetchDocumentation(ctx, raw)
+	}
 	if !publicDocURL(raw) {
 		return "", ErrDocumentation
 	}
-	u, _ := url.Parse(raw)
-	fragment := u.Fragment
-	u.Fragment = ""
-	b, contentType, e := fetchPublic(ctx, u, "text/html, text/plain, application/json", maxDocumentationBytes)
+	if c.Agent == nil {
+		return "", fmt.Errorf("%w: documentation agent (CB_AGENT_URL) not configured", ErrDocumentation)
+	}
+	p, e := c.Agent.Fetch(ctx, raw, nil, maxChars)
 	if e != nil {
-		return "", e
+		return "", fmt.Errorf("%w: %s", ErrDocumentation, trunc(e.Error(), 200))
 	}
-	text := string(b)
-	if strings.Contains(contentType, "html") {
-		if fragment != "" {
-			text = focusedSection(text, fragment)
-		}
-		text = html.UnescapeString(markupTags.ReplaceAllString(scriptTags.ReplaceAllString(text, " "), " "))
-	}
-	text = compact(text)
-	if len(text) < 20 {
-		return "", fmt.Errorf("%w: page has no usable public API text", ErrDocumentation)
-	}
-	// Bound prompt size as well as download size. Evidence can only cite the
-	// transmitted excerpt; a later section needs a more focused reference.
-	if len(text) > maxDocumentationText {
-		text = strings.Clone(text[:maxDocumentationText])
-	}
-	return text, nil
-}
-
-// fetchPublic downloads one public HTTPS reference: egress guarded, no
-// redirects, bounded in time, concurrency and size. Shared by documentation
-// pages and OpenAPI specs.
-func fetchPublic(ctx context.Context, u *url.URL, accept string, limit int) ([]byte, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	select {
-	case documentationSlots <- struct{}{}:
-		defer func() { <-documentationSlots }()
-	case <-ctx.Done():
-		return nil, "", fmt.Errorf("%w: documentation reader busy", ErrDocumentation)
-	}
-	client := (egress.Policy{}).Client(15 * time.Second)
-	// Docs sites redirect canonical URLs (learn.microsoft.com adds ?view=).
-	// No credentials travel here, so follow a few same-host redirects that
-	// pass the same public checks; the egress dialer still guards the IP.
-	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
-		if len(via) > 3 || r.URL.Hostname() != via[0].URL.Hostname() || !publicDocURL(r.URL.String()) {
-			return fmt.Errorf("redirect not followed")
-		}
-		return nil
-	}
-	defer client.CloseIdleConnections()
-	req, e := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
-	if e != nil {
-		return nil, "", ErrDocumentation
-	}
-	req.Header.Set("Accept", accept)
-	res, e := client.Do(req)
-	if e != nil {
-		return nil, "", fmt.Errorf("%w: public documentation could not be reached", ErrDocumentation)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		return nil, "", fmt.Errorf("%w: documentation returned HTTP %d; provide its final public URL", ErrDocumentation, res.StatusCode)
-	}
-	contentType := strings.ToLower(res.Header.Get("Content-Type"))
-	if !strings.Contains(contentType, "text/") && !strings.Contains(contentType, "json") && !strings.Contains(contentType, "yaml") {
-		return nil, "", fmt.Errorf("%w: use a text, HTML, JSON or YAML reference", ErrDocumentation)
-	}
-	b, e := io.ReadAll(io.LimitReader(res.Body, int64(limit)+1))
-	if e != nil || len(b) > limit {
-		return nil, "", fmt.Errorf("%w: document unavailable or larger than %d MiB", ErrDocumentation, limit>>20)
-	}
-	return b, contentType, nil
-}
-
-// A supplied heading fragment focuses a large API reference on the operation
-// the customer chose. It is a document selection, never an inferred API route.
-func focusedSection(body, fragment string) string {
-	re := regexp.MustCompile(`(?i)<h([1-6])\b[^>]*\bid=["']` + regexp.QuoteMeta(fragment) + `["'][^>]*>`)
-	m := re.FindStringSubmatchIndex(body)
-	if m == nil {
-		return body
-	}
-	start := m[0]
-	level := body[m[2]:m[3]]
-	next := regexp.MustCompile(`(?i)<h` + level + `\b`).FindStringIndex(body[m[1]:])
-	if next == nil {
-		return body[start:]
-	}
-	return body[start : m[1]+next[0]]
+	return p.Text, nil
 }
 
 // Prepare retrieves public references before reserving paid AI tokens.
@@ -203,11 +110,7 @@ func (c *Client) Prepare(ctx context.Context, r Request) (Request, error) {
 	}
 	r.documents = map[string]string{}
 	for _, source := range r.DocumentationURLs {
-		fetch := c.FetchDocumentation
-		if fetch == nil {
-			fetch = readPublicDocumentation
-		}
-		text, e := fetch(ctx, source)
+		text, e := c.fetchDoc(ctx, source, maxDocumentationText)
 		if e != nil {
 			return r, e
 		}
@@ -320,6 +223,7 @@ func verifyDocumentation(r Request, cfg config.Config, out *modelOutput) []confi
 		pages = append(pages, source)
 	}
 	sort.Strings(pages)
+	examples := 0 // JSON printed on the pages themselves (model quotes don't count)
 	for _, source := range pages {
 		doc := r.documents[source]
 		for _, w := range windows(doc, 400, 200) {
@@ -328,10 +232,17 @@ func verifyDocumentation(r Request, cfg config.Config, out *modelOutput) []confi
 			}
 		}
 		for _, ex := range docJSON(doc) {
+			examples++
 			by["items_path"] = append(by["items_path"], Evidence{Kind: "items_path", URL: source, Quote: ex})
 			by["field"] = append(by["field"], Evidence{Kind: "field", URL: source, Quote: ex})
 		}
 	}
+	// No page prints any JSON (no response example at all): the record path
+	// and field paths cannot be proven from the docs, only from the vendor's
+	// real response. Defer exactly those two checks to live proof; a page
+	// that DOES print JSON must still contain them.
+	shapeFromLive := examples == 0
+	out.liveProof = nil
 	checked := []Evidence{}
 	proven := func(kind, value string, predicate func(string) bool) bool {
 		// Verify against the actual config, not the model's spelling of its
@@ -442,7 +353,9 @@ func verifyDocumentation(r Request, cfg config.Config, out *modelOutput) []confi
 	if cfg.Auth.TokenURL != "" && !proven("token_url", cfg.Auth.TokenURL, func(q string) bool { return strings.Contains(route(q), route(cfg.Auth.TokenURL)) }) {
 		problem("auth.token_url", "documented token endpoint required")
 	}
-	if !proven("items_path", cfg.ItemsPath, func(q string) bool {
+	if shapeFromLive {
+		out.liveProof = append(out.liveProof, "items_path")
+	} else if !proven("items_path", cfg.ItemsPath, func(q string) bool {
 		v, ok := jsonExample(q)
 		if !ok {
 			return false
@@ -481,6 +394,10 @@ func verifyDocumentation(r Request, cfg config.Config, out *modelOutput) []confi
 		problem("pagination", "documented pagination strategy and configured parameters required")
 	}
 	for dest, path := range mappedPaths(cfg, problem) {
+		if shapeFromLive {
+			out.liveProof = append(out.liveProof, "destination.mapping."+dest)
+			continue
+		}
 		if !proven("field", path, func(q string) bool {
 			v, ok := jsonExample(q)
 			if !ok {
@@ -497,6 +414,7 @@ func verifyDocumentation(r Request, cfg config.Config, out *modelOutput) []confi
 	if len(issues) == 0 {
 		out.Evidence = checked
 	}
+	sort.Strings(out.liveProof)
 	return issues
 }
 

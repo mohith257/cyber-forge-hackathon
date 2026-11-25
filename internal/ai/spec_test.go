@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"configbridge/internal/agent"
 	"context"
 	"encoding/json"
 	"errors"
@@ -189,10 +190,8 @@ func specGemini(t *testing.T, pick string) (*Client, *[]string) {
 		b, _ := io.ReadAll(r.Body)
 		var text string
 		switch body := string(b); {
-		case strings.Contains(body, "OpenAPI (Swagger) specification"):
-			calls, text = append(calls, "spec"), "SPEC: "+acmeSpecURL
 		case strings.Contains(body, "google_search"):
-			calls, text = append(calls, "search"), "URL: none"
+			t.Error("the API searched itself; search belongs to the agent")
 		case strings.Contains(body, "OPERATION CATALOG"):
 			calls, text = append(calls, "pick"), mustJSON(map[string]any{"operation": pick, "class": "user_inventory", "scope": "organization", "alternatives": []string{"GET /nope"}, "reason": "lists users"})
 		default:
@@ -213,7 +212,19 @@ func specGemini(t *testing.T, pick string) (*Client, *[]string) {
 		}
 		return acmeSpec, nil
 	}
+	// the agent confirmed the vendor's spec file (its loop is tested in agent/)
+	c.Agent = specAgent{calls: &calls}
 	return c, &calls
+}
+
+type specAgent struct {
+	noDocs
+	calls *[]string
+}
+
+func (a specAgent) Discover(context.Context, string, string, *agent.Rejected, int) (*agent.Discovery, error) {
+	*a.calls = append(*a.calls, "spec")
+	return &agent.Discovery{Found: true, SpecURLs: []string{acmeSpecURL}, Usage: agentUsage}, nil
 }
 
 func TestNameOnlyDraftsFromOpenAPISpec(t *testing.T) {
@@ -231,7 +242,8 @@ func TestNameOnlyDraftsFromOpenAPISpec(t *testing.T) {
 func TestPickOutsideTheCatalogFallsBackToDocsNotToTheModel(t *testing.T) {
 	c, calls := specGemini(t, "GET /api/v1/admins")
 	_, e := c.Draft(context.Background(), Request{Product: "Acme", Data: "auto"}, nil)
-	if !errors.Is(e, ErrDocumentation) || strings.Join(*calls, ",") != "spec,pick,search" {
+	var bad *InvalidDraft
+	if !errors.As(e, &bad) || bad.Last != nil || strings.Join(*calls, ",") != "spec,pick,spec,pick" {
 		t.Fatal("invented operation reached drafting", e, *calls)
 	}
 }

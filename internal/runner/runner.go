@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 )
@@ -165,6 +166,8 @@ func (r *Runner) run(ctx context.Context, tenant, id string, test, scheduled boo
 		}
 	}
 	sampleDone := errors.New("sample_complete")
+	// preview: which mapped vendor paths the live sample actually contains
+	seen := map[string]bool{}
 	fetch := func() (engine.Result, error) {
 		return r.Fetcher.Fetch(ctx, incremental.Apply(c.Connector(tenant), c.Incremental, run.Incremental), func(page engine.Page) error {
 			if e := ctx.Err(); e != nil {
@@ -183,6 +186,15 @@ func (r *Runner) run(ctx context.Context, tenant, id string, test, scheduled boo
 			for i, row := range items {
 				if e := ctx.Err(); e != nil {
 					return e
+				}
+				if test {
+					for _, spec := range c.Destination.Mapping {
+						if spec.Path != nil && !seen[*spec.Path] {
+							if v, _ := mapping.Path(row, *spec.Path); v != nil {
+								seen[*spec.Path] = true
+							}
+						}
+					}
 				}
 				q, err := incremental.CheckRow(row, c.Incremental, run.Incremental, run.Received+i)
 				if err != nil {
@@ -246,6 +258,14 @@ func (r *Runner) run(ctx context.Context, tenant, id string, test, scheduled boo
 		if errors.Is(e, context.Canceled) {
 			run.Outcome = "interrupted"
 		}
+	}
+	if test && run.Received > 0 {
+		for _, spec := range c.Destination.Mapping {
+			if spec.Path != nil && !seen[*spec.Path] && !slices.Contains(run.Unseen, *spec.Path) {
+				run.Unseen = append(run.Unseen, *spec.Path)
+			}
+		}
+		slices.Sort(run.Unseen)
 	}
 	end := time.Now().UTC()
 	run.EndedAt = &end

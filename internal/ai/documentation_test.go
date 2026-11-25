@@ -168,24 +168,6 @@ func TestGenericDoesNotReturnExecutableCandidateAfterEvidenceFailures(t *testing
 	}
 }
 
-func TestPublicDocumentationReaderRejectsInternalDestinations(t *testing.T) {
-	for _, raw := range []string{"https://127.0.0.1/api", "https://169.254.169.254/metadata", "https://[::1]/api", "file:///etc/passwd"} {
-		if _, e := readPublicDocumentation(context.Background(), raw); !errors.Is(e, ErrDocumentation) {
-			t.Fatal("unsafe document destination accepted", raw, e)
-		}
-	}
-}
-func TestFocusedDocumentationKeepsOnlyChosenOperation(t *testing.T) {
-	body := `<h2 id="wrong">Enterprise pricing</h2><h2 id="right">Public users</h2><h3>Auth</h3>Bearer<h2 id="next">Other endpoint</h2>`
-	got := focusedSection(body, "right")
-	if !strings.Contains(got, "Public users") || !strings.Contains(got, "Bearer") || strings.Contains(got, "Enterprise") || strings.Contains(got, "Other endpoint") {
-		t.Fatal(got)
-	}
-	if focusedSection(body, "absent") != body {
-		t.Fatal("missing headings must not invent a section")
-	}
-}
-
 func TestDocumentationHandlesHighlightedRoutesAndCanonicalEvidenceLabels(t *testing.T) {
 	out, r := groundedFixture()
 	doc := strings.ReplaceAll(fixtureDoc, "GET /orgs/owasp/members", "GET /orgs /owasp /members")
@@ -239,5 +221,35 @@ func TestDocumentationRejectsHostAndRouteSubstringConfusion(t *testing.T) {
 		if len(verifyDocumentation(r, cfg, out)) == 0 {
 			t.Fatal("substring mistaken for exact host/route evidence")
 		}
+	}
+}
+
+// Docs that print no JSON at all cannot prove the response shape: only those
+// checks move to live proof; a page WITH JSON must still contain the paths,
+// and every other fact still needs the page.
+func TestResponseShapeDefersToLiveProofOnlyWithoutAnyJSONOnThePages(t *testing.T) {
+	o, r := groundedFixture()
+	noJSON := strings.Replace(fixtureDoc, fixtureExample, "", 1)
+	if noJSON == fixtureDoc {
+		t.Fatal("fixture example not found")
+	}
+	r.documents = map[string]string{fixtureReference: noJSON}
+	cfg, _ := config.Decode([]byte(o.ConfigJSON))
+	if got := verifyDocumentation(r, cfg, o); len(got) != 0 {
+		t.Fatal(got)
+	}
+	if got := strings.Join(o.liveProof, ","); !strings.Contains(got, "items_path") || !strings.Contains(got, "destination.mapping.") {
+		t.Fatal("deferred checks not listed", o.liveProof)
+	}
+	r.documents = map[string]string{fixtureReference: strings.Replace(noJSON, "Bearer", "token", 1)}
+	if got := verifyDocumentation(r, cfg, o); len(got) == 0 {
+		t.Fatal("auth still needs the page")
+	}
+	o, r = groundedFixture()
+	o.ConfigJSON = strings.ReplaceAll(o.ConfigJSON, `"login"`, `"made_up_email"`)
+	r.documents = map[string]string{fixtureReference: fixtureDoc}
+	cfg, _ = config.Decode([]byte(o.ConfigJSON))
+	if got := verifyDocumentation(r, cfg, o); len(got) == 0 || len(o.liveProof) != 0 {
+		t.Fatal("a page with JSON must still prove every path", got, o.liveProof)
 	}
 }

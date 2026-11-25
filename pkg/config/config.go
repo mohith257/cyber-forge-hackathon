@@ -245,7 +245,11 @@ func (c Config) Validate() []Issue {
 					key = candidate
 				}
 			}
-			add(key, "invalid request-side setting; check required fields and supported values")
+			msg := "invalid request-side setting; check required fields and supported values"
+			if strings.HasPrefix(line, "auth.secret (the secret name) is required") {
+				msg = "required: the local name of the stored credential (e.g. vendor_token) when auth.type is not none"
+			}
+			add(key, msg)
 		}
 	}
 	if c.Version != 1 {

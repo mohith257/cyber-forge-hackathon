@@ -83,7 +83,7 @@ func (c *Client) research(ctx context.Context, r Request, used *meter) (string, 
 }
 
 func (c *Client) search(ctx context.Context, r Request, used *meter) (string, error) {
-	data := "its main security dataset that EVERY customer has on the standard plan (users, devices, logins or findings); if a richer dataset needs a premium/enterprise tier, name it and its tier separately"
+	data := autoData + "; if a richer dataset needs a premium/enterprise tier, name it and its tier separately"
 	if !r.Auto() {
 		data = "OCSF class " + r.Data
 	}
@@ -100,20 +100,8 @@ func (c *Client) search(ctx context.Context, r Request, used *meter) (string, er
 5. Key record fields (id, name/email, status, timestamps).
 6. The exact official documentation URLs you used.
 Say "unknown" for anything the docs do not state. Do not guess.`
-	body := map[string]any{
-		"contents": []map[string]any{{"role": "user", "parts": []map[string]any{{"text": q}}}},
-		"tools":    []map[string]any{{"google_search": map[string]any{}}},
-		// fact lookup, not puzzle solving: low thinking cuts latency ~4x.
-		// (Search + strict JSON in ONE call skips the search, so it stays two calls.)
-		"generationConfig": map[string]any{"thinkingConfig": map[string]any{"thinkingLevel": "low"}},
-	}
-	var text string
-	e := c.retry(ctx, func() (time.Duration, error) {
-		t, u, wait, e := c.geminiCall(ctx, body)
-		used.add(u)
-		text = t
-		return wait, e
-	})
+	// (Search + strict JSON in ONE call skips the search, so it stays two calls.)
+	text, e := c.groundedText(ctx, q, used)
 	if len(text) > 12000 {
 		text = text[:12000]
 	}
@@ -142,15 +130,9 @@ func (c *Client) geminiOnce(ctx context.Context, msgs []message, s schema) (stri
 }
 
 // geminiCall posts one generateContent request and returns the answer text and
-// reported tokens (output = everything billed beyond the prompt: thoughts,
-// search tool use and the answer).
+// reported tokens (output = everything billed beyond the prompt: thoughts and
+// the answer). Web search runs in the agent, never here.
 func (c *Client) geminiCall(ctx context.Context, body map[string]any) (string, insights.Usage, time.Duration, error) {
-	return c.geminiGrounded(ctx, body, nil)
-}
-
-// geminiGrounded also returns the web pages Google Search actually used
-// (groundingChunks), when refs is non-nil.
-func (c *Client) geminiGrounded(ctx context.Context, body map[string]any, refs *[]string) (string, insights.Usage, time.Duration, error) {
 	none := insights.Usage{}
 	raw, _ := json.Marshal(body)
 	req, e := http.NewRequestWithContext(ctx, "POST", c.URL+url.PathEscape(c.Model)+":generateContent", bytes.NewReader(raw))
@@ -184,13 +166,6 @@ func (c *Client) geminiGrounded(ctx context.Context, body map[string]any, refs *
 			Total  int64 `json:"totalTokenCount"`
 		} `json:"usageMetadata"`
 		Candidates []struct {
-			GroundingMetadata struct {
-				Chunks []struct {
-					Web struct {
-						URI string `json:"uri"`
-					} `json:"web"`
-				} `json:"groundingChunks"`
-			} `json:"groundingMetadata"`
 			FinishReason string `json:"finishReason"`
 			Content      struct {
 				Parts []struct {
@@ -209,13 +184,6 @@ func (c *Client) geminiGrounded(ctx context.Context, body map[string]any, refs *
 	}
 	if len(gr.Candidates) == 0 {
 		return "", u, 0, fmt.Errorf("%w: no answer", ErrUpstream)
-	}
-	if refs != nil {
-		for _, ch := range gr.Candidates[0].GroundingMetadata.Chunks {
-			if ch.Web.URI != "" && len(*refs) < 10 {
-				*refs = append(*refs, ch.Web.URI)
-			}
-		}
 	}
 	var sb strings.Builder
 	for _, p := range gr.Candidates[0].Content.Parts {

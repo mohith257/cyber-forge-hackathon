@@ -136,7 +136,7 @@ function enumText(a) {
 }
 
 // ---------- shell ----------
-const NAV = [['overview', 'Overview'], ['connectors', 'Sources'], ['builder', 'Add source', 'configs:write'], ['records', 'OCSF records'], ['insights', 'Insights'], ['kev-alerts', 'KEV alerts'], ['email-alerts', 'Email alerts'], ['vendor-map', 'Vendor map'], ['ai-usage', 'AI usage'], ['quarantine', 'Quarantine'], ['runs', 'Runs'], ['secrets', 'Secrets'], ['access', 'Users & keys']];
+const NAV = [['overview', 'Overview'], ['connectors', 'Sources'], ['builder', 'Add source', 'configs:write'], ['records', 'OCSF records'], ['posture', 'Attack surface'], ['insights', 'Insights'], ['kev-alerts', 'KEV alerts'], ['email-alerts', 'Email alerts'], ['vendor-map', 'Vendor map'], ['ai-usage', 'AI usage'], ['quarantine', 'Quarantine'], ['runs', 'Runs'], ['secrets', 'Secrets'], ['access', 'Users & keys']];
 function lock(msg) {
   S.me = null;
   app().replaceChildren(loginView(msg));
@@ -231,7 +231,7 @@ function route() {
   const v = document.getElementById('view');
   if (!v) return;
   const name = view.split('?')[0];
-  const fn = { overview, connectors, builder, records, insights, 'kev-alerts': kevAlerts, 'email-alerts': emailAlerts, 'vendor-map': vendorMap, 'ai-usage': aiUsagePage, quarantine, runs, secrets, access }[name] || overview;
+  const fn = { overview, connectors, builder, records, posture, insights, 'kev-alerts': kevAlerts, 'email-alerts': emailAlerts, 'vendor-map': vendorMap, 'ai-usage': aiUsagePage, quarantine, runs, secrets, access }[name] || overview;
   v.replaceChildren(h('div', { class: 'muted' }, 'Loading…'));
   fn(v, decodeURIComponent(arg.split('?')[0]), q).catch((e) => {
     if (S.me) v.replaceChildren(h('div', { class: 'card' }, h('div', { class: 'empty' }, 'Could not load: ' + e.message)));
@@ -521,6 +521,43 @@ async function vendorMap(v, _a, q) {
     ...m.notes.map((n) => h('div', { class: 'small muted' }, n)),
     node(m.vendor, true), subsBox));
 }
+// Attack surface: the tool-agnostic correlation engine. It groups every OCSF
+// record by shared entity (CVE, IP, host, user, device) across sources, so any
+// two tools mentioning the same entity form a correlation. Deterministic (no
+// AI), computed on open. Every connected source joins automatically — nothing
+// here names a vendor. "Ask AI" hands one cluster's source to Insights.
+async function posture(v, _a, _q) {
+  const d = await must('GET', '/posture');
+  const tierTag = (t) => h('span', { class: 'tag tier-' + t }, t.toUpperCase());
+  const entityLabel = { cve: 'CVE', ip: 'IP', host: 'Host', user: 'User', device: 'Device' };
+  const counts = { critical: 0, high: 0, medium: 0 };
+  (d.clusters || []).forEach((c) => { counts[c.tier] = (counts[c.tier] || 0) + 1; });
+  const askSource = (c) => (c.records && c.records[0] || c.sources && c.sources[0] || '').split('/')[0];
+  v.replaceChildren(
+    header('Attack surface', 'Every source is correlated by shared OCSF entity — CVE, IP, host, user, device — not by vendor. Add any tool that maps to standard OCSF fields and it joins automatically. Prioritisation computed on open, not proof of compromise.', h('button', { onclick: () => route() }, 'Refresh')),
+    h('div', { class: 'stack' },
+      h('div', { class: 'card bd row' },
+        h('span', { class: 'tag tier-critical' }, counts.critical + ' critical'),
+        h('span', { class: 'tag tier-high' }, counts.high + ' high'),
+        h('span', { class: 'tag tier-medium' }, counts.medium + ' medium'),
+        h('span', { class: 'grow' }),
+        h('span', { class: 'small faint' }, (d.clusters || []).length + ' correlated entit(y/ies)')),
+      !(d.clusters || []).length
+        ? h('div', { class: 'card' }, h('div', { class: 'empty' }, 'No cross-tool correlations yet. Connect two or more sources (or a CISA KEV feed) so entities can overlap.'))
+        : h('div', { class: 'stack' }, d.clusters.map((c) => h('div', { class: 'card bd' },
+            h('div', { class: 'row' }, tierTag(c.tier),
+              h('span', { class: 'tag' }, entityLabel[c.type] || c.type),
+              h('strong', {}, h('code', {}, c.value)),
+              c.is_kev ? h('span', { class: 'tag tier-critical' }, 'KEV') : null,
+              c.high_severity ? h('span', { class: 'tag tier-high' }, 'high-sev') : null,
+              h('span', { class: 'grow' }),
+              askSource(c) ? h('a', { class: 'btn sm', href: '#/insights?connector=' + encodeURIComponent(askSource(c)) + '&topic=security_findings' }, 'Ask AI') : null),
+            h('p', { class: 'small muted', style: 'margin:6px 0' }, c.rationale),
+            h('div', { class: 'small' }, h('span', { class: 'faint' }, 'Seen by: '),
+              (c.sources || []).map((s) => h('span', { class: 'tag', style: 'margin-right:4px' }, s))),
+            h('div', { class: 'small faint' }, (c.records || []).length + ' correlated record(s)')))),
+      (d.notes && d.notes.length) ? h('div', { class: 'card' }, d.notes.map((n) => h('p', { class: 'small faint', style: 'margin:4px 0' }, n))) : null));
+}
 async function kevAlerts(v, _a, q) {
   const offset = Math.max(0, Number(q.get('offset')) || 0);
   const d = await must('GET', '/kev/matches?limit=50&offset=' + offset);
@@ -777,7 +814,7 @@ const obj = (rows) => Object.fromEntries(rows.filter(([k]) => k.trim()).map(([k,
 const num = (x) => (x === '' || x === undefined || x === null || isNaN(+x) ? undefined : +x);
 function blank() {
   return { id: '', name: '', vendor: '', keep: {}, url: '', timeout: '20', ports: '', params: [], headers: [['Accept', 'application/json']],
-    auth: { type: 'none', secret: '', header: '', username: '', token_url: '', client_id: '', scopes: '', extra: [], tpl: [] },
+    auth: { type: 'none', secret: '', header: '', param: '', username: '', token_url: '', client_id: '', scopes: '', extra: [], tpl: [] },
     items_path: '', pag: { type: 'none', page_param: 'page', start_page: '1', offset_param: 'offset', size_param: 'limit', page_size: '100', cursor_param: '', cursor_path: '', next_url_path: '' },
     filter: [], cls: 'user_inventory', activity: '', rows: [{ o: 'user.uid', src: 'path', val: 'id', tf: 'string', req: true, lookup: '', def: '', fmt: '', tz: '' }],
     sched: { enabled: false, interval: '3600' }, notifications: { present: false, enabled: false, failure_threshold: '3', cooldown_seconds: '3600' }, limits: { max_pages: '10', max_records: '1000', max_response_bytes: '1048576', max_run_seconds: '60' },
@@ -789,7 +826,7 @@ function parse(c) {
   Object.assign(f, { id: c.id || '', name: c.name || '', vendor: c.vendor || '', keep: { incremental: c.incremental }, url: r.url || '', timeout: String(r.timeout_seconds || ''), ports: (r.allowed_ports || []).join(', '),
     params: kv(r.params), headers: kv(r.headers), items_path: c.items_path || '', cls: (c.destination || {}).class || 'user_inventory',
     activity: (c.destination || {}).activity_id ? String(c.destination.activity_id) : '' });
-  f.auth = { type: a.type || 'none', secret: a.secret || '', header: a.header || '', username: a.username || '', token_url: a.token_url || '', client_id: a.client_id || '',
+  f.auth = { type: a.type || 'none', secret: a.secret || '', header: a.header || '', param: a.param || '', username: a.username || '', token_url: a.token_url || '', client_id: a.client_id || '',
     scopes: (a.scopes || []).join(', '), extra: kv(a.extra_params), tpl: (a.headers || []).map((x) => [x.name, x.value]) };
   for (const k of Object.keys(f.pag)) if (k !== 'type') f.pag[k] = p[k] !== undefined && p[k] !== null && p[k] !== '' && (p[k] !== 0 || k === 'start_page') ? String(p[k]) : '';
   f.pag.type = p.type || 'none';
@@ -811,7 +848,7 @@ const typed = (raw, text) => (raw !== undefined && asText(raw) === text ? raw : 
 function serialize(f) {
   const a = f.auth, t = a.type, auth = { type: t };
   if (t !== 'none') auth.secret = a.secret.trim();
-  if (t === 'api_key') auth.header = a.header.trim();
+  if (t === 'api_key') { if (a.param && a.param.trim()) auth.param = a.param.trim(); else auth.header = a.header.trim(); }
   if (t === 'basic') auth.username = a.username.trim();
   if (t === 'oauth2_client_credentials') {
     auth.token_url = a.token_url.trim();
@@ -921,7 +958,9 @@ function renderBuilder(v) {
     secretInput = inp(a, 'secret', { list: 'secret-names', placeholder: 'auto-filled from Secrets when one matches the URL host' });
     authBody.push(field('Secret name', secretInput, 'the name only, never the value'), secretHint);
   }
-  if (at === 'api_key') authBody.push(field('Header', inp(a, 'header', { placeholder: 'X-API-Key' })));
+  if (at === 'api_key') authBody.push(a.param && a.param.trim()
+    ? field('Query parameter', inp(a, 'param', { placeholder: 'key' }), 'the key is sent as ?' + a.param.trim() + '=… (vendors like Shodan)')
+    : field('Header', inp(a, 'header', { placeholder: 'X-API-Key' })));
   if (at === 'basic') authBody.push(field('Username', inp(a, 'username', { placeholder: 'me@company.com' })));
   if (at === 'oauth2_client_credentials') authBody.push(field('Token URL', inp(a, 'token_url', { placeholder: 'https://auth.vendor.com/oauth2/token' })),
     h('div', { class: 'grid2' }, field('Client ID', inp(a, 'client_id', { placeholder: 'empty = secret field client_id' })), field('Scopes', inp(a, 'scopes', { placeholder: 'read, users.read' }))),
@@ -1246,7 +1285,7 @@ function draftCard(v) {
   let n = 0;
   return h('div', { class: 'card' }, h('div', { class: 'bd stack' },
     h('div', {}, h('h2', {}, c.name || c.id), h('div', { class: 'small muted' }, 'Pulling ', h('strong', {}, kind(c.destination.class)), ' from ' + (apiHost || c.request.url))),
-    W.draft.contract ? h('div', { class: 'stack small' }, h('strong', {}, W.draft.contract.scope), h('span', {}, W.draft.contract.access), h('code', {}, W.draft.contract.method + ' ' + c.request.url), h('span', {}, 'Auth: ' + W.draft.contract.authentication + '; records: ' + (W.draft.contract.items_path || 'root array') + '; pagination: ' + W.draft.contract.pagination), h('span', {}, 'Response fields used: ' + W.draft.contract.response_fields.join(', ')), h('span', { class: 'muted' }, W.draft.contract.status === 'reviewed_profile_fallback' ? 'The AI proposal differed from the reviewed contract; this draft uses the reviewed template. Test it before activating.' : W.draft.contract.status === 'documented_candidate' ? 'Citations checked against supplied public references. Preview and review before activation.' : 'Reviewed public API contract. Test it before activating.')) : null,
+    W.draft.contract ? h('div', { class: 'stack small' }, h('strong', {}, W.draft.contract.scope), h('span', {}, W.draft.contract.access), h('code', {}, W.draft.contract.method + ' ' + c.request.url), h('span', {}, 'Auth: ' + W.draft.contract.authentication + '; records: ' + (W.draft.contract.items_path || 'root array') + '; pagination: ' + W.draft.contract.pagination), h('span', {}, 'Response fields used: ' + W.draft.contract.response_fields.join(', ')), h('span', { class: 'muted' }, W.draft.contract.status === 'reviewed_profile_fallback' ? 'The AI proposal differed from the reviewed contract; this draft uses the reviewed template. Test it before activating.' : W.draft.contract.status === 'needs_live_proof' ? 'The docs show no response example: the record path and fields are unproven. Activation previews with your key and refuses until real records contain every mapped field.' : W.draft.contract.status === 'documented_candidate' ? 'Citations checked against supplied public references. Preview and review before activation.' : 'Reviewed public API contract. Test it before activating.')) : null,
     pathFields,
     (W.draft.also_available || []).length ? h('div', { class: 'row small' }, h('span', { class: 'muted' }, 'Also available from ' + (W.product.trim() || 'this product') + ':'),
       W.draft.also_available.map((k) => h('button', { type: 'button', class: 'sm', title: 'Set up ' + kind(k) + ' as another source',
@@ -1301,14 +1340,16 @@ async function doStep(k, btn) {
     if (k === 'activate') {
       const rev = (B.saved || B.existing).revision;
       const r = await api('POST', `/configs/${id}/activate`, { revision: rev });
-      return set(r.ok, r.ok ? `rev ${rev} is live` : (r.data && r.data.error) || 'HTTP ' + r.status);
+      const d = r.data || {};
+      return set(r.ok, r.ok ? `rev ${rev} is live` : d.detail || (d.error || 'HTTP ' + r.status).replace(/_/g, ' '));
     }
     // preview: the exact saved revision, before it goes live; test/run: the live revision
     const r = k === 'preview' ? await api('POST', `/configs/${id}/test`, { revision: (B.saved || B.existing).revision })
       : await api('POST', `/connectors/${id}/${k === 'test' ? 'test' : 'run'}`);
     const d = r.data || {};
     if (!d.id) return set(false, (d.error || 'HTTP ' + r.status).replace(/_/g, ' '));
-    const msg = `${d.outcome} · ${d.received} received, ${d.accepted} accepted, ${d.quarantined} quarantined` + (d.skipped ? `, ${d.skipped} skipped` : '') + (d.error ? ' · ' + d.error : '');
+    const unseen = (d.unseen_paths || []).length ? ' · not in any record: ' + d.unseen_paths.join(', ') : '';
+    const msg = `${d.outcome} · ${d.received} received, ${d.accepted} accepted, ${d.quarantined} quarantined` + (d.skipped ? `, ${d.skipped} skipped` : '') + (d.error ? ' · ' + d.error : '') + unseen;
     return set(r.ok && d.outcome === 'success', msg);
   };
   try { return btn ? await busy(btn, run) : await run(); } catch { return false; }

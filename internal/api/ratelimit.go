@@ -34,7 +34,7 @@ var DefaultLimits = Limits{
 	VerifiedIP:  Rate{PerSecond: 100, Burst: 300}, // high, so one noisy key can't starve neighbours on a shared IP/NAT
 	FailedPerIP: Rate{PerSecond: 0.2, Burst: 10},  // 10 misses, then one per 5 s
 	PerKey:      Rate{PerSecond: 10, Burst: 40},
-	RunPerKey:   Rate{PerSecond: 0.2, Burst: 6}, // 6 runs at once, then one per 5 s
+	RunPerKey:   Rate{PerSecond: 0.2, Burst: 6},  // 6 runs at once, then one per 5 s
 	AIPerKey:    Rate{PerSecond: 0.5, Burst: 20}, // 20 drafts at once, then one per 2 s
 }
 

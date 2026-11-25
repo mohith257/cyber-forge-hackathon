@@ -77,6 +77,9 @@ td.clip { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-spa
 .pill.warn { background: var(--warn-bg); color: var(--warn); }
 .pill.bad { background: var(--bad-bg); color: var(--bad); }
 .tag { display: inline-block; padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: 5px; font: 11.5px var(--mono); color: var(--muted); background: var(--panel); }
+.tier-critical { color: #8a1c1c; border-color: #d99; background: #fbeaea; }
+.tier-high { color: #8a4b00; border-color: #e0b36a; background: #fbf1e0; }
+.tier-medium { color: #555; border-color: var(--line-strong); background: #f3f3f2; }
 
 /* controls */
 button, .btn { font: inherit; font-size: 13px; border-radius: 6px; padding: 6px 12px; border: 1px solid var(--line-strong); background: var(--panel); color: var(--text); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }

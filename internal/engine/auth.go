@@ -27,7 +27,7 @@ type oauthToken struct {
 //
 //	none     -> nothing
 //	static   -> headers built from secret fields, e.g. x-xdr-auth-id: {{secret.key_id}}
-//	api_key  -> custom header:   X-API-Key: <secret>
+//	api_key  -> custom header:   X-API-Key: <secret>   (or query param ?key=<secret> when auth.param is set)
 //	bearer   -> Authorization:   Bearer <secret>
 //	basic    -> Authorization:   Basic base64(username:secret)
 //	oauth2   -> Authorization:   Bearer <short-lived token fetched with the client secret>
@@ -64,7 +64,17 @@ func (e *Engine) authorize(ctx context.Context, client *http.Client, c Connector
 			req.Header.Set(h.Name, v)
 		}
 	case "api_key":
-		req.Header.Set(a.Header, s.value())
+		if a.Param == "" {
+			req.Header.Set(a.Header, s.value())
+			break
+		}
+		// Query-string key (vendors like Shodan accept nothing else). Set on this
+		// request only, after the URL was built: the paging/base URLs, logs and
+		// errors use the key-free URL (RedactURL drops queries anyway), and
+		// redirects are never followed, so the key reaches only the bound host.
+		q := req.URL.Query()
+		q.Set(a.Param, s.value())
+		req.URL.RawQuery = q.Encode()
 	case "bearer":
 		req.Header.Set("Authorization", "Bearer "+s.value())
 	case "basic":

@@ -2,10 +2,10 @@ package ai
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"configbridge/internal/insights"
 )
@@ -26,29 +26,22 @@ type Claim struct {
 
 var claimLine = regexp.MustCompile(`(?im)^\s*[-*]?\s*(OWNS|INCIDENT)\s*:\s*(.+?)\s*$`)
 
+// groundedText: one Google-Search-grounded answer, run by the agent.
 func (c *Client) groundedText(ctx context.Context, prompt string, used *meter) (string, error) {
-	body := map[string]any{
-		"contents":         []map[string]any{{"role": "user", "parts": []map[string]any{{"text": prompt}}}},
-		"tools":            []map[string]any{{"google_search": map[string]any{}}},
-		"generationConfig": map[string]any{"thinkingConfig": map[string]any{"thinkingLevel": "low"}},
+	if c.Agent == nil {
+		return "", fmt.Errorf("%w: web search needs the documentation agent (CB_AGENT_URL)", ErrUpstream)
 	}
-	var text string
-	e := c.retry(ctx, func() (time.Duration, error) {
-		t, u, wait, e := c.geminiGrounded(ctx, body, nil)
-		used.add(u)
-		text = t
-		return wait, e
-	})
-	return text, e
+	res, e := c.Agent.Search(ctx, prompt)
+	if e != nil {
+		return "", fmt.Errorf("%w: %s", ErrUpstream, trunc(e.Error(), 200))
+	}
+	used.add(insights.Usage{Known: res.Usage.Total > 0, Input: res.Usage.Input, Output: res.Usage.Output, Total: res.Usage.Total})
+	return res.Text, nil
 }
 
 // verifyClaims fetches each cited page (public-only reader) and keeps the
 // claims whose quote is on the page and passes check.
 func (c *Client) verifyClaims(ctx context.Context, claims []Claim, check func(Claim) bool) []Claim {
-	fetch := c.FetchDocumentation
-	if fetch == nil {
-		fetch = readPublicDocumentation
-	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	ok := make([]bool, len(claims))
@@ -59,7 +52,7 @@ func (c *Client) verifyClaims(ctx context.Context, claims []Claim, check func(Cl
 		wg.Add(1)
 		go func(i int, cl Claim) {
 			defer wg.Done()
-			text, e := fetch(ctx, cl.URL)
+			text, e := c.fetchDoc(ctx, cl.URL, maxVerifyText)
 			if e == nil && strings.Contains(strings.ToLower(compact(text)), strings.ToLower(compact(cl.Quote))) {
 				mu.Lock()
 				ok[i] = true

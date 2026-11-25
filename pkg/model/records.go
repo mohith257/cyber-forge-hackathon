@@ -74,6 +74,9 @@ type Run struct {
 	Skipped       int         `json:"skipped"`
 	Error         string      `json:"error"`
 	Incremental   *SyncWindow `json:"incremental,omitempty"`
+	// Preview only: mapped vendor paths that no sampled record contained.
+	// Activation requires this to be empty (live proof of the field paths).
+	Unseen []string `json:"unseen_paths,omitempty"`
 }
 type SyncWindow struct {
 	Since           time.Time  `json:"since"`

@@ -74,6 +74,9 @@ var migrationTenantKMS string
 //go:embed migrations/018_signup_cap.sql
 var migrationSignupCap string
 
+//go:embed migrations/019_live_proof.sql
+var migrationLiveProof string
+
 // migrations run in order, once each, inside the migration transaction. Each
 // lists the tables it creates so they get forced row-level security.
 // 2-5 were applied first on main; OCSF (6) retires the PRD-era tables after them.
@@ -101,6 +104,7 @@ var migrations = []struct {
 	{16, migrationAIResearchReporting, nil},
 	{17, migrationTenantKMS, nil},
 	{18, migrationSignupCap, nil},
+	{19, migrationLiveProof, []string{"live_proof"}},
 }
 var ErrNotFound = errors.New("not_found")
 var ErrBusy = errors.New("connector_busy")
@@ -231,7 +235,7 @@ func Migrate(ctx context.Context, dsn, appRole string) error {
 	if _, e = tx.Exec(ctx, "GRANT USAGE ON SCHEMA "+sch+" TO "+role); e != nil {
 		return e
 	}
-	for _, table := range []string{"configs", "credentials_meta", "credentials_values", "runs", "ocsf_records", "quarantine", "sync_state", "iam_users", "api_keys", "iam_sessions"} {
+	for _, table := range []string{"configs", "credentials_meta", "credentials_values", "runs", "ocsf_records", "quarantine", "sync_state", "iam_users", "api_keys", "iam_sessions", "live_proof"} {
 		if _, e = tx.Exec(ctx, "GRANT SELECT,INSERT,UPDATE,DELETE ON "+pgx.Identifier{schema, table}.Sanitize()+" TO "+role); e != nil {
 			return e
 		}

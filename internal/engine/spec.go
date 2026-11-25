@@ -63,6 +63,7 @@ type Auth struct {
 	Type             string   `json:"type"`                         // none | static | api_key | bearer | basic | oauth2_client_credentials
 	Secret           string   `json:"secret"`                       // secret NAME in the secret store, e.g. "crowdstrike"
 	Header           string   `json:"header"`                       // api_key only: header name, e.g. "X-API-Key"
+	Param            string   `json:"param,omitempty"`              // api_key only, instead of header: query parameter name for vendors that accept nothing else (Shodan "key")
 	Username         string   `json:"username"`                     // basic only: e.g. the Jira account email
 	TokenURL         string   `json:"token_url"`                    // oauth2 only: where to get access tokens
 	ClientID         string   `json:"client_id"`                    // oauth2 only: the API client's ID (not secret); "" = take it from secret field "client_id"
@@ -265,8 +266,18 @@ func (c Connector) validate(allowHTTP bool) error {
 	case "static":
 		validateStaticHeaders(a.Headers, bad)
 	case "api_key":
-		if a.Header == "" {
-			bad("auth.header is required for api_key")
+		switch {
+		case (a.Header == "") == (a.Param == ""):
+			bad("auth.header or auth.param (exactly one) is required for api_key")
+		case a.Param != "" && !validParamName(a.Param):
+			bad("auth.param: letters, digits, _ - . only")
+		case a.Param != "":
+			// the engine owns this parameter: nothing else may set it
+			pg := c.Pagination
+			_, inParams := c.Request.Params[a.Param]
+			if inParams || a.Param == pg.PageParam || a.Param == pg.OffsetParam || a.Param == pg.SizeParam || a.Param == pg.CursorParam {
+				bad("auth.param %s is also set by request.params or pagination", a.Param)
+			}
 		}
 	case "bearer":
 	case "basic":
@@ -287,6 +298,9 @@ func (c Connector) validate(allowHTTP bool) error {
 	}
 	if a.Type != "none" && a.Secret == "" {
 		bad("auth.secret (the secret name) is required for %s", a.Type)
+	}
+	if a.Param != "" && a.Type != "api_key" {
+		bad("auth.param is only valid for api_key")
 	}
 	if a.ClientAuthMethod != "" {
 		if a.Type != "oauth2_client_credentials" || (a.ClientAuthMethod != "client_secret_basic" && a.ClientAuthMethod != "client_secret_post") {
@@ -343,11 +357,10 @@ func (c Connector) validate(allowHTTP bool) error {
 	default:
 		bad("pagination.type %q is not supported", p.Type)
 	}
-	// page/offset stop when a page is shorter than page_size, so the vendor
-	// must actually be told the size we expect.
-	if p.PageSize > 0 && p.SizeParam == "" && (p.Type == "page" || p.Type == "offset") {
-		bad("pagination.size_param is required when page_size is set")
-	}
+	// page/offset stop when a page is shorter than page_size. Without
+	// size_param, page_size is the vendor's FIXED page size (Shodan: 100, no
+	// size parameter). A wrong guess is safe: Fetch learns the real size from
+	// the first page and confirms a short first page with one extra request.
 
 	// --- limits and retry: keep values inside sane ranges ---
 	// decoding JSON costs ~15x the body in memory (load test: 60 MB -> 926 MiB)
@@ -419,4 +432,17 @@ func validateStaticHeaders(hs []HeaderTemplate, bad func(string, ...any)) {
 	if placeholders == 0 {
 		bad("auth.headers must use at least one {{secret.<field>}} placeholder")
 	}
+}
+
+// validParamName: a plain query parameter name (1-64 of A-Z a-z 0-9 _ - .).
+func validParamName(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.') {
+			return false
+		}
+	}
+	return true
 }

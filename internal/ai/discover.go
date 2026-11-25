@@ -1,28 +1,28 @@
 package ai
 
 import (
+	"configbridge/internal/agent"
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
-	"time"
 
-	"configbridge/internal/egress"
 	"configbridge/internal/insights"
 	"configbridge/pkg/config"
 	"configbridge/pkg/ocsf"
 )
 
-// Name-only drafting: the customer types just a product name. One Gemini call
-// with Google Search finds the vendor's official API reference pages plus the
-// exact dataset heading and access scope they use. Those then go through the
-// ordinary documented flow: the backend fetches the pages itself and every
-// execution setting must cite them (verifyDocumentation). Search output is
-// only ever a list of candidate references, never trusted as config.
+// Name-only drafting: the customer types just a product name. The Rust agent
+// (agent/, /v1/discover) runs a bounded search -> read -> follow links ->
+// probe spec loop and returns only pages it fetched, specs it confirmed and a
+// dataset heading found verbatim on a cited page. Those then go through the
+// ordinary spec or documented flow, where every execution setting must be
+// proven again (verifySpec / verifyDocumentation). Nothing rests on the model.
+
+// scopes: what a list endpoint lists across (shared with checkDocumentation).
+var scopes = map[string]bool{"public": true, "repository": true, "organization": true, "account": true, "tenant": true, "enterprise": true}
 
 // ErrSearchRequired: name-only drafting needs a provider with web search.
 var ErrSearchRequired = fmt.Errorf("%w: typing only a product name needs CB_AI_PROVIDER=gemini (web search); otherwise add public API documentation URLs, dataset and scope", ErrDocumentation)
@@ -34,168 +34,6 @@ func (r Request) nameOnly() bool {
 
 // hasSpec: the customer supplied the vendor's OpenAPI spec themselves.
 func (r Request) hasSpec() bool { return r.SpecURL != "" || r.SpecText != "" }
-
-type discovery struct {
-	urls           []string
-	dataset, scope string
-}
-
-var discoveryLine = regexp.MustCompile(`(?im)^\s*[-*]?\s*(URL|DATASET|SCOPE)\s*:\s*(.+?)\s*$`)
-var scopes = map[string]bool{"public": true, "repository": true, "organization": true, "account": true, "tenant": true, "enterprise": true}
-
-// parseDiscovery reads the labelled lines; anything else in the answer is ignored.
-func parseDiscovery(text string) (discovery, error) {
-	var d discovery
-	seen := map[string]bool{}
-	for _, m := range discoveryLine.FindAllStringSubmatch(text, -1) {
-		v := strings.Trim(m[2], " `*\"'<>")
-		switch strings.ToUpper(m[1]) {
-		case "URL":
-			if !seen[v] && len(d.urls) < 3 && publicDocURL(v) {
-				seen[v] = true
-				d.urls = append(d.urls, v)
-			}
-		case "DATASET":
-			if d.dataset == "" && len(v) >= 2 && len(v) <= 200 {
-				d.dataset = v
-			}
-		case "SCOPE":
-			if s := strings.ToLower(v); d.scope == "" && scopes[s] {
-				d.scope = s
-			}
-		}
-	}
-	// URLs may still come from search grounding; the model must name the
-	// dataset and scope (it answers "URL: none" alone when it found nothing).
-	if d.dataset == "" || d.scope == "" {
-		return d, errNoReference
-	}
-	return d, nil
-}
-
-var errNoReference = fmt.Errorf("%w: web search found no usable official API reference for this product; add its documentation URL", ErrDocumentation)
-
-const groundingHost = "vertexaisearch.cloud.google.com"
-
-// resolveGrounding turns Google's grounding redirect into the page search
-// actually visited, reading only the Location header (never following it).
-// The result passes the same public-only checks as any reference.
-func resolveGrounding(ctx context.Context, raw string) string {
-	u, e := url.Parse(raw)
-	if e != nil || u.Scheme != "https" || u.Hostname() != groundingHost {
-		if publicDocURL(raw) {
-			return raw
-		}
-		return ""
-	}
-	cl := (egress.Policy{}).Client(10 * time.Second)
-	cl.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	defer cl.CloseIdleConnections()
-	req, e := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
-	if e != nil {
-		return ""
-	}
-	res, e := cl.Do(req)
-	if e != nil {
-		return ""
-	}
-	res.Body.Close()
-	l, e := url.Parse(res.Header.Get("Location"))
-	if e != nil {
-		return ""
-	}
-	dropTracking(l) // keep content selectors like ?view=, drop analytics
-	if publicDocURL(l.String()) {
-		return l.String()
-	}
-	return ""
-}
-
-// fetchSome keeps the first three references that load; dead links are skipped.
-func (c *Client) fetchSome(ctx context.Context, urls []string) (map[string]string, []string, error) {
-	fetch := c.FetchDocumentation
-	if fetch == nil {
-		fetch = readPublicDocumentation
-	}
-	docs, kept := map[string]string{}, []string{}
-	last := errNoReference
-	for _, u := range urls {
-		if len(kept) == 3 {
-			break
-		}
-		text, e := fetch(ctx, u)
-		// a JavaScript-built page has (almost) no text until rendered
-		if (e != nil || len(compact(text)) < 1500) && c.Render != nil {
-			if page, re := c.Render(ctx, u); re == nil && len(page.Text) > len(compact(text)) {
-				text, e = page.Text, nil
-			}
-		}
-		if e != nil {
-			last = e
-			continue
-		}
-		if text = compact(text); len(text) > maxDocumentationText {
-			text = strings.Clone(text[:maxDocumentationText])
-		}
-		docs[u], kept = text, append(kept, u)
-	}
-	if len(kept) == 0 {
-		return nil, nil, last
-	}
-	return docs, kept, nil
-}
-
-func (c *Client) discover(ctx context.Context, r Request, used *meter) (discovery, error) {
-	q := "Product: " + strings.TrimSpace(r.Product) + "\nData wanted: " + wantedData(r) + `
-Search the vendor's CURRENT official API documentation. Find the read-only REST GET endpoint that lists that data.
-Answer with exactly these lines and nothing else:
-URL: <the official reference page for that endpoint, on the vendor's own documentation site; the page must show the route, authentication and a JSON response example>
-URL: <optional second official page: how to get credentials / the token URL, if the API uses OAuth or app registration>
-URL: <optional third official page, e.g. the pagination page>
-DATASET: <the endpoint's heading copied verbatim from that page, e.g. List users>
-SCOPE: <one word that appears on that page describing what it lists across: public, repository, organization, account, tenant or enterprise>
-Never invent a URL. If you cannot find an official page, answer: URL: none`
-	body := map[string]any{
-		"contents":         []map[string]any{{"role": "user", "parts": []map[string]any{{"text": q}}}},
-		"tools":            []map[string]any{{"google_search": map[string]any{}}},
-		"generationConfig": map[string]any{"thinkingConfig": map[string]any{"thinkingLevel": "low"}},
-	}
-	var text string
-	var grounded []string
-	e := c.retry(ctx, func() (time.Duration, error) {
-		grounded = grounded[:0]
-		t, u, wait, e := c.geminiGrounded(ctx, body, &grounded)
-		used.add(u)
-		text = t
-		return wait, e
-	})
-	if e != nil {
-		return discovery{}, e
-	}
-	if c.debugDiscovery != nil {
-		c.debugDiscovery(text)
-	}
-	d, e := parseDiscovery(text)
-	if e != nil {
-		return d, e
-	}
-	// Then the pages Google Search actually returned: real pages, unlike a URL
-	// the model typed (which can be a plausible 404).
-	seen := map[string]bool{}
-	for _, u := range d.urls {
-		seen[u] = true
-	}
-	for _, g := range grounded {
-		if u := resolveGrounding(ctx, g); u != "" && !seen[u] && len(d.urls) < 6 {
-			seen[u] = true
-			d.urls = append(d.urls, u)
-		}
-	}
-	if len(d.urls) == 0 {
-		return d, errNoReference
-	}
-	return d, nil
-}
 
 // site is the registrable domain, approximately: the last two labels, or three
 // under a two-letter ccTLD with a short second level (example.co.uk).
@@ -234,65 +72,141 @@ func (c *Client) discoveredDraft(ctx context.Context, r Request) (*Draft, error)
 	if !c.gemini {
 		return nil, ErrSearchRequired
 	}
-	var used meter
-	// Preferred evidence, in order: a reviewed spec location, the vendor's
-	// OpenAPI file found by search, a spec embedded in its docs pages. Only
-	// then documentation text. A spec without the data falls through.
-	reviewed := reviewedSpec(r.Product)
-	tryURLs := func(urls []string) (*Draft, bool, error) {
-		sp, e := c.loadSpec(ctx, urls)
-		if e != nil {
-			return nil, false, nil
-		}
-		// a reviewed location's publisher was checked by a human
-		d, e := c.specDraft(ctx, r, sp, sp.url == reviewed, &used)
-		if errors.Is(e, errNoSpec) {
-			return nil, false, nil
-		}
-		return d, true, e
+	if c.Agent == nil {
+		return nil, fmt.Errorf("%w: documentation agent (CB_AGENT_URL) not configured", ErrDocumentation)
 	}
-	if reviewed != "" {
-		if d, done, e := tryURLs([]string{reviewed}); done {
+	var used meter
+	// Preferred evidence, in order: a reviewed spec location, an official
+	// OpenAPI file the agent confirmed, a spec embedded in the docs pages it
+	// read. Only then documentation text. A spec without the data falls through.
+	if reviewed := reviewedSpec(r.Product); reviewed != "" {
+		if d, done, e := c.trySpecs(ctx, r, []string{reviewed}, &used); done {
 			return d, e
 		}
 	}
-	urls, e := c.findSpecs(ctx, r, &used)
-	if e != nil && !errors.Is(e, errNoSpec) {
-		return nil, e
+	// Two discovery passes at most: when the verifier rejects the first
+	// pass's pages, its reasons go back to the agent, which then reads the
+	// missing page or picks another endpoint. The checks never loosen.
+	var prev *agent.Rejected
+	var rejected *InvalidDraft
+	for pass := 1; pass <= discoveryPasses; pass++ {
+		found, e := c.Agent.Discover(ctx, r.Product, wantedData(r), prev, maxDocumentationText)
+		if e != nil {
+			if rejected != nil {
+				rejected.Usage = used.total()
+				return nil, rejected
+			}
+			return nil, agentFailure(e)
+		}
+		used.add(insights.Usage{Known: found.Usage.Total > 0, Input: found.Usage.Input, Output: found.Usage.Output, Total: found.Usage.Total})
+		if !found.Found {
+			if rejected != nil {
+				rejected.Usage = used.total()
+				return nil, rejected
+			}
+			return nil, &InvalidDraft{Issues: []config.Issue{{Field: "documentation", Message: "web search found no verified official API reference: " + trunc(found.Reason, 200) + "; add its documentation URL"}}, Usage: used.total()}
+		}
+		if d, done, e := c.trySpecs(ctx, r, found.SpecURLs, &used); done {
+			return d, e
+		}
+		d, e := c.draftFromDiscovery(ctx, r, found, &used)
+		var bad *InvalidDraft
+		switch {
+		case errors.As(e, &bad):
+			used.add(bad.Usage)
+			rejected, prev = bad, rejection(found, bad)
+			continue
+		case e != nil:
+			return nil, e
+		}
+		d.Usage = plus(used, d.Usage)
+		return d, nil
 	}
-	if d, done, e := tryURLs(urls); done {
+	rejected.Usage = used.total()
+	return nil, rejected
+}
+
+// trySpecs drafts from the first candidate that is (or embeds) an official
+// spec with the wanted data. done=false: no usable spec, fall through to docs.
+func (c *Client) trySpecs(ctx context.Context, r Request, urls []string, used *meter) (d *Draft, done bool, e error) {
+	sp, e := c.loadSpec(ctx, urls)
+	if e != nil {
+		return nil, false, nil
+	}
+	// a reviewed location's publisher was checked by a human
+	d, e = c.specDraft(ctx, r, sp, sp.url == reviewedSpec(r.Product), used)
+	if errors.Is(e, errNoSpec) {
+		return nil, false, nil
+	}
+	return d, true, e
+}
+
+// discoveryPasses bounds name-only cost: one retry with the verifier's reasons.
+const discoveryPasses = 2
+
+// rejection tells the agent what was cited and why it failed.
+func rejection(found *agent.Discovery, bad *InvalidDraft) *agent.Rejected {
+	cited := []string{}
+	for _, d := range found.Docs {
+		cited = append(cited, d.URL)
+	}
+	msgs := []string{}
+	for _, i := range bad.Issues {
+		if len(msgs) < 5 {
+			msgs = append(msgs, i.Field+": "+trunc(i.Message, 250))
+		}
+	}
+	return &agent.Rejected{Dataset: found.Dataset, Docs: cited,
+		Feedback: "cited dataset \"" + found.Dataset + "\" on " + strings.Join(cited, ", ") + "; issues: " + strings.Join(msgs, " | ")}
+}
+
+// draftFromDiscovery drafts from the pages one discovery pass verified. The
+// usage it reports covers only its own (drafting) calls.
+func (c *Client) draftFromDiscovery(ctx context.Context, r Request, found *agent.Discovery, used *meter) (*Draft, error) {
+	docURLs := []string{}
+	for _, d := range found.Docs {
+		docURLs = append(docURLs, d.URL)
+	}
+	if d, done, e := c.trySpecs(ctx, r, docURLs, used); done {
 		return d, e
 	}
-	found, e := c.discover(ctx, r, &used)
+	if found.Dataset == "" || len(found.Docs) == 0 {
+		return nil, &InvalidDraft{Issues: []config.Issue{{Field: "documentation", Message: "the official spec found has no usable list operation for this data; add the documentation URL"}}}
+	}
+	r.Dataset, r.Scope, r.DocumentationURLs, r.documents = found.Dataset, found.Scope, docURLs, map[string]string{}
+	for _, doc := range found.Docs {
+		text := compact(doc.Text) // the agent already rendered JavaScript-only pages
+		if len(text) > maxDocumentationText {
+			text = strings.Clone(text[:maxDocumentationText])
+		}
+		r.documents[doc.URL] = text
+	}
+	d, e := c.documentedDraft(ctx, r)
 	if e != nil {
 		return nil, e
 	}
-	if d, done, e := tryURLs(found.urls); done {
-		return d, e
-	}
-	r.Dataset, r.Scope = found.dataset, found.scope
-	if r.documents, r.DocumentationURLs, e = c.fetchSome(ctx, found.urls); e != nil {
-		return nil, e
-	}
-	d, e := c.documentedDraft(ctx, r)
-	var bad *InvalidDraft
-	switch {
-	case errors.As(e, &bad):
-		bad.Usage = plus(used, bad.Usage)
-		return nil, bad
-	case e != nil:
-		return nil, e
-	}
-	d.Usage = plus(used, d.Usage)
 	if d.Contract == nil || !sameSite(d.Contract.Endpoint, d.Sources) {
 		return nil, &InvalidDraft{Issues: []config.Issue{{Field: "request.url", Message: "the API host does not belong to the same site as the documentation web search found; add the vendor's official documentation URL"}}, Usage: d.Usage}
 	}
-	d.Notes = append([]string{"Found from the product name by web search: " + strings.Join(found.urls, ", ") + ". Check these are the vendor's official pages before activating."}, d.Notes...)
+	note := "Found from the product name by web search: " + strings.Join(docURLs, ", ") + "."
+	if len(found.Queries) > 0 {
+		note += " Searches run: " + trunc(strings.Join(found.Queries, " | "), 300) + "."
+	}
+	d.Notes = append([]string{note + " Check these are the vendor's official pages before activating."}, d.Notes...)
 	return d, nil
 }
 
+// agentFailure maps an agent error to the drafter's errors: provider trouble
+// is ErrUpstream (retryable), anything else is missing documentation.
+func agentFailure(e error) error {
+	var ae *agent.Error
+	if errors.As(e, &ae) && ae.Code == "provider" {
+		return fmt.Errorf("%w: %s", ErrUpstream, trunc(ae.Message, 200))
+	}
+	return fmt.Errorf("%w: %s", ErrDocumentation, trunc(e.Error(), 200))
+}
+
 var errNoSpec = fmt.Errorf("%w: no usable official OpenAPI spec", ErrDocumentation)
-var specLine = regexp.MustCompile(`(?im)^\s*[-*]?\s*SPEC\s*:\s*(.+?)\s*$`)
 
 func specFile(raw string) bool {
 	u, e := url.Parse(raw)
@@ -300,72 +214,22 @@ func specFile(raw string) bool {
 	return e == nil && (strings.HasSuffix(p, ".json") || strings.HasSuffix(p, ".yaml") || strings.HasSuffix(p, ".yml"))
 }
 
+// autoData: what "auto" asks for, for every kind of security product. A
+// list endpoint, because a scheduled collector pages through records; a
+// single-item lookup (one IP, one user) needs input only the customer has.
+const autoData = "the main security dataset every customer can LIST on the standard plan: users, devices, logins, vulnerability or detection findings, alerts, or, for a threat-intelligence product, its bulk list of flagged indicators (IPs, domains, hashes); a list endpoint, not a single-item lookup"
+
 func wantedData(r Request) string {
 	if r.Auto() {
-		return "the main security dataset every customer has on the standard plan (users, devices, logins or findings)"
+		return autoData
 	}
 	return "records for the OCSF class " + r.Data
-}
-
-// findSpecs: one web search for the vendor's official OpenAPI file. Model
-// typed URLs and spec files Google Search actually visited are candidates;
-// each is only believed once it downloads and parses as a spec.
-func (c *Client) findSpecs(ctx context.Context, r Request, used *meter) ([]string, error) {
-	q := "Product: " + strings.TrimSpace(r.Product) + `
-Find the vendor's CURRENT official OpenAPI (Swagger) specification file for its REST API: the machine-readable JSON or YAML file published by the vendor itself, on its own website or its official GitHub organization.
-Answer with exactly these lines and nothing else:
-SPEC: <direct URL of that JSON or YAML file>
-SPEC: <optional second official spec file URL>
-Never invent a URL. If the vendor publishes no official OpenAPI file, answer: SPEC: none`
-	body := map[string]any{
-		"contents":         []map[string]any{{"role": "user", "parts": []map[string]any{{"text": q}}}},
-		"tools":            []map[string]any{{"google_search": map[string]any{}}},
-		"generationConfig": map[string]any{"thinkingConfig": map[string]any{"thinkingLevel": "low"}},
-	}
-	var text string
-	var grounded []string
-	e := c.retry(ctx, func() (time.Duration, error) {
-		grounded = grounded[:0]
-		t, u, wait, e := c.geminiGrounded(ctx, body, &grounded)
-		used.add(u)
-		text = t
-		return wait, e
-	})
-	if e != nil {
-		return nil, e
-	}
-	if c.debugDiscovery != nil {
-		c.debugDiscovery("SPEC SEARCH: " + text)
-	}
-	seen, out := map[string]bool{}, []string{}
-	add := func(u string) {
-		if u != "" && !seen[u] && len(out) < 4 && publicDocURL(u) {
-			seen[u] = true
-			out = append(out, u)
-		}
-	}
-	for _, m := range specLine.FindAllStringSubmatch(text, -1) {
-		add(strings.Trim(m[1], " `*\"'<>"))
-	}
-	for _, g := range grounded {
-		if u := resolveGrounding(ctx, g); specFile(u) {
-			add(u)
-		}
-	}
-	if len(out) == 0 {
-		return nil, errNoSpec
-	}
-	return out, nil
 }
 
 // loadSpec: the first candidate that is (or embeds) a spec with list
 // operations. A JavaScript-only docs page is rendered when a renderer is
 // configured; spec files the page itself loads become candidates too.
 func (c *Client) loadSpec(ctx context.Context, urls []string) (*apiSpec, error) {
-	fetch := c.FetchSpec
-	if fetch == nil {
-		fetch = readPublicSpec
-	}
 	usable := func(sp *apiSpec) bool { return sp != nil && len(sp.listOps()) > 0 }
 	fromText := func(u, text string) *apiSpec {
 		if sp, e := parseSpec(u, text); e == nil && usable(sp) {
@@ -380,16 +244,16 @@ func (c *Client) loadSpec(ctx context.Context, urls []string) (*apiSpec, error) 
 	}
 	for i := 0; i < len(urls) && i < 6; i++ {
 		u := urls[i]
-		text, e := fetch(ctx, u)
+		text, e := c.readSpec(ctx, u)
 		if e == nil {
 			if sp := fromText(u, text); sp != nil {
 				return sp, nil
 			}
 		}
-		if c.Render == nil || specFile(u) {
+		if specFile(u) {
 			continue
 		}
-		page, e := c.Render(ctx, u)
+		page, e := c.render(ctx, u)
 		if e != nil {
 			continue
 		}

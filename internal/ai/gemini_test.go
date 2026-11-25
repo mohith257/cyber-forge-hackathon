@@ -23,8 +23,11 @@ func TestGeminiResearchesThenDraftsAndChecksHosts(t *testing.T) {
 		if r.Header.Get("x-goog-api-key") != "k" || strings.Contains(r.URL.RawQuery, "key=") {
 			t.Error("key must travel in the header only")
 		}
-		text := "API host api.github.com, bearer token, Link paging. Docs: https://docs.github.com/rest"
-		if !strings.Contains(string(b), "google_search") {
+		var text string
+		if strings.Contains(string(b), "google_search") {
+			t.Error("the API searched itself; search belongs to the agent")
+		}
+		{
 			calls = append(calls, "draft")
 			if !strings.Contains(string(b), "Link paging") || !strings.Contains(string(b), "responseJsonSchema") {
 				t.Error("draft call must carry the research and the strict schema")
@@ -32,8 +35,6 @@ func TestGeminiResearchesThenDraftsAndChecksHosts(t *testing.T) {
 			o, _ := json.Marshal(map[string]any{"config_json": string(cfg), "notes": []string{}, "needed": []string{}, "optional": []string{},
 				"sources": []string{"https://docs.github.com/rest", "https://made-up.invalid/docs"}, "also_available": []string{}})
 			text = string(o)
-		} else {
-			calls = append(calls, "research")
 		}
 		json.NewEncoder(w).Encode(map[string]any{"candidates": []any{map[string]any{"finishReason": "STOP",
 			"content": map[string]any{"parts": []any{map[string]any{"text": text}}}}}})
@@ -41,6 +42,8 @@ func TestGeminiResearchesThenDraftsAndChecksHosts(t *testing.T) {
 	defer srv.Close()
 	c := NewGemini("k", "m")
 	c.URL, c.HTTP = srv.URL+"/", srv.Client()
+	searches := 0
+	c.Agent = searchAgent{text: "API host api.github.com, bearer token, Link paging. Docs: https://docs.github.com/rest", calls: &searches}
 	resolved := 0
 	c.Resolve = func(_ context.Context, h string) error {
 		resolved++
@@ -53,7 +56,7 @@ func TestGeminiResearchesThenDraftsAndChecksHosts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(calls, ",") != "research,draft" || c.Provider() != "gemini" {
+	if searches != 1 || strings.Join(calls, ",") != "draft" || c.Provider() != "gemini" {
 		t.Fatalf("calls %v", calls)
 	}
 	if len(d.Sources) != 1 || d.Sources[0] != "https://docs.github.com/rest" || resolved == 0 {
@@ -76,13 +79,8 @@ func TestCheckHostsRejectsMadeUpHost(t *testing.T) {
 
 func TestGeminiResearchCachedWithoutNotes(t *testing.T) {
 	n := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n++
-		json.NewEncoder(w).Encode(map[string]any{"candidates": []any{map[string]any{"content": map[string]any{"parts": []any{map[string]any{"text": "facts"}}}}}})
-	}))
-	defer srv.Close()
 	c := NewGemini("k", "m")
-	c.URL, c.HTTP = srv.URL+"/", srv.Client()
+	c.Agent = searchAgent{text: "facts", calls: &n}
 	for _, r := range []Request{{Product: "Okta"}, {Product: " okta ", Data: "auto"}, {Product: "Okta", Details: "private notes"}} {
 		if _, err := c.research(context.Background(), r, &meter{}); err != nil {
 			t.Fatal(err)

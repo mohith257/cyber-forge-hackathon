@@ -8,3 +8,5 @@ PRD_*.pdf
 
 deploy/pages/dist/
 .wrangler/
+docker-compose.override.yml
+agent/target/

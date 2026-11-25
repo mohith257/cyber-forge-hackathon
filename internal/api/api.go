@@ -25,6 +25,7 @@ import (
 	"configbridge/internal/store"
 	"configbridge/pkg/config"
 	"configbridge/pkg/incremental"
+	"configbridge/pkg/model"
 	"configbridge/pkg/ocsf"
 	"configbridge/pkg/secrets"
 )
@@ -131,6 +132,7 @@ func New(a *API) (http.Handler, error) {
 	mux.HandleFunc("POST /siem/ask", a.siemAsk)
 	mux.HandleFunc("GET /alerts", a.alerts)
 	mux.HandleFunc("GET /notifications/status", a.notificationStatus)
+	mux.HandleFunc("GET /posture", a.posture)
 	mux.HandleFunc("GET /exposure", a.exposure)
 	mux.HandleFunc("GET /kev/matches", a.kevMatches)
 	mux.HandleFunc("GET /intel/map", a.intelMap)
@@ -294,7 +296,7 @@ func New(a *API) (http.Handler, error) {
 			return
 		}
 		// runs/tests call the vendor and AI drafts call the model: both are costly
-		// (POST /configs/{id}/test previews a draft against the real vendor too)
+		// (POST /configs/{id}/test and /activate preview against the real vendor too)
 		// GET /intel/map calls Wikidata on every cache miss: outbound, so costly too
 		// AI calls get their own bucket so drafting isn't starved by runs/tests.
 		if r.Method == http.MethodPost && (r.URL.Path == "/ai/draft" || r.URL.Path == "/siem/ask" || r.URL.Path == "/intel/research") {
@@ -303,7 +305,7 @@ func New(a *API) (http.Handler, error) {
 				return
 			}
 		} else if r.Method == http.MethodGet && r.URL.Path == "/intel/map" || r.Method == http.MethodPost && (strings.HasPrefix(r.URL.Path, "/connectors/") || strings.HasPrefix(r.URL.Path, "/configs/")) &&
-			(strings.HasSuffix(r.URL.Path, "/run") || strings.HasSuffix(r.URL.Path, "/test") || strings.HasSuffix(r.URL.Path, "/repair")) {
+			(strings.HasSuffix(r.URL.Path, "/run") || strings.HasSuffix(r.URL.Path, "/test") || strings.HasSuffix(r.URL.Path, "/repair") || strings.HasSuffix(r.URL.Path, "/activate")) {
 			if ok, retry := lim.take("run:"+key, rl.RunPerKey); !ok {
 				limited(w, retry)
 				return
@@ -577,12 +579,54 @@ func (a *API) activate(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "revision_required")
 		return
 	}
-	if e := a.scope(r).Activate(r.Context(), r.PathValue("id"), body.Revision); e != nil {
+	// Live proof: for an AI draft whose docs printed no response example, only
+	// the vendor's real response proves the record array and field paths.
+	// Activation then previews this exact revision with the stored key and
+	// goes live only when records arrived, all mapped, and every mapped path
+	// was seen in them.
+	id := r.PathValue("id")
+	pending, err := a.scope(r).NeedsLiveProof(r.Context(), id)
+	if err != nil {
+		dbFail(w, err)
+		return
+	}
+	if pending {
+		proof, err := a.Engine.Preview(r.Context(), a.scope(r).Tenant, id, body.Revision)
+		if err != nil && proof.ID == "" {
+			dbFail(w, err)
+			return
+		}
+		if detail := unproven(proof); detail != "" {
+			write(w, 422, map[string]any{"error": "activation_needs_live_proof", "detail": detail, "preview": proof})
+			return
+		}
+	}
+	if e := a.scope(r).Activate(r.Context(), id, body.Revision); e != nil {
 		dbFail(w, e)
 		return
 	}
-	write(w, 200, map[string]any{"id": r.PathValue("id"), "revision": body.Revision, "status": "live"})
+	if pending {
+		if e := a.scope(r).LiveProven(r.Context(), id); e != nil {
+			dbFail(w, e) // activated; the next activation just previews again
+			return
+		}
+	}
+	write(w, 200, map[string]any{"id": id, "revision": body.Revision, "status": "live"})
 }
+
+// unproven: why a preview does not prove a config ("" when it does).
+func unproven(p model.Run) string {
+	switch {
+	case p.Outcome != "success":
+		return "the preview with your stored key did not succeed (" + strings.TrimSpace(p.Outcome+" "+p.Error) + "); fix the source and preview again"
+	case p.Accepted == 0:
+		return "the preview returned no records, so the record path and field paths the docs did not show are unproven; activate once the source has data"
+	case len(p.Unseen) > 0:
+		return "no previewed record contains " + strings.Join(p.Unseen, ", ") + "; remove or correct these mapped paths"
+	}
+	return ""
+}
+
 func (a *API) putSecret(w http.ResponseWriter, r *http.Request) {
 	var body secrets.Input
 	if !jsonBody(w, r, &body) {
@@ -694,6 +738,21 @@ func (a *API) aiDraft(w http.ResponseWriter, r *http.Request) {
 	if e := scope.RecordAI(done, audit); e != nil {
 		dbFail(w, e)
 		return
+	}
+	if e == nil && d.Contract != nil && d.Contract.Status == "needs_live_proof" {
+		// the gate lives server-side: whatever the client saves under this id
+		// cannot be activated without a preview that proves it
+		var draft struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(d.Config, &draft) != nil || !config.ValidID(draft.ID) {
+			fail(w, 502, "ai_draft_unusable")
+			return
+		}
+		if e := scope.RequireLiveProof(done, draft.ID); e != nil {
+			dbFail(w, e)
+			return
+		}
 	}
 	switch {
 	case e == nil:

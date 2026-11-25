@@ -42,6 +42,7 @@ type specOp struct {
 	secDeclared              bool
 	response                 map[string]any // 2xx JSON body schema
 	headers                  []string       // 2xx response headers, lower case
+	fromExample              bool           // response schema derived from the spec's own example (the declared one was bare)
 }
 
 type specParam struct {
@@ -229,12 +230,14 @@ func buildSpec(source string, root map[string]any) (*apiSpec, error) {
 		} else {
 			op.security, op.secDeclared = s.security, s.secDeclared
 		}
+		s.queryKeyScheme(op)
 		responses := obj(get["responses"])
 		for _, code := range []string{"200", "2XX", "2xx", "201", "203", "206", "default"} {
 			r := s.resolve(obj(responses[code]))
 			if r == nil {
 				continue
 			}
+			var example any
 			if v3 {
 				content := obj(r["content"])
 				types := make([]string, 0, len(content))
@@ -244,12 +247,29 @@ func buildSpec(source string, root map[string]any) (*apiSpec, error) {
 				sort.Strings(types)
 				for _, k := range types {
 					if strings.Contains(k, "json") {
-						op.response = s.resolve(obj(obj(content[k])["schema"]))
+						media := obj(content[k])
+						op.response = s.resolve(obj(media["schema"]))
+						example = media["example"]
+						for _, name := range sortedKeys(obj(media["examples"])) {
+							if example != nil {
+								break
+							}
+							example = s.resolve(obj(obj(media["examples"])[name]))["value"]
+						}
 						break
 					}
 				}
 			} else {
 				op.response = s.resolve(obj(r["schema"]))
+				example = obj(r["examples"])["application/json"]
+			}
+			// Some vendors (Shodan) declare every body as a bare {"type":"object"}
+			// and put the real shape only in the example. The example is the
+			// vendor's own published data, so its structure is evidence too.
+			if example != nil && s.bare(op.response) {
+				if sc := schemaFromExample(example, 0); sc != nil {
+					op.response, op.fromExample = sc, true
+				}
 			}
 			for h := range obj(r["headers"]) {
 				op.headers = append(op.headers, strings.ToLower(h))
@@ -261,6 +281,114 @@ func buildSpec(source string, root map[string]any) (*apiSpec, error) {
 		s.ops[op.key] = op
 	}
 	return s, nil
+}
+
+// bare: a schema that declares no structure at all (nil, {} or {"type":"object"}).
+func (s *apiSpec) bare(sc map[string]any) bool {
+	sc = s.resolve(sc)
+	if sc == nil {
+		return true
+	}
+	_, isArray := s.arrayItems(sc, 0)
+	return !isArray && len(s.props(sc, 0)) == 0 && len(s.branches(sc)) == 0 && sc["additionalProperties"] == nil
+}
+
+// schemaFromExample derives a JSON schema from an example value: objects get
+// their keys as properties, arrays the merged shape of their first elements,
+// scalars their JSON type. Only what the example shows; nothing is added.
+func schemaFromExample(v any, depth int) map[string]any {
+	if depth > 8 {
+		return map[string]any{}
+	}
+	switch x := v.(type) {
+	case map[string]any:
+		props := map[string]any{}
+		for k, val := range x {
+			props[k] = schemaFromExample(val, depth+1)
+		}
+		return map[string]any{"type": "object", "properties": props}
+	case []any:
+		items := map[string]any{}
+		for i, el := range x {
+			if i == 20 {
+				break
+			}
+			items = mergeSchemas(items, schemaFromExample(el, depth+1))
+		}
+		return map[string]any{"type": "array", "items": items}
+	case string:
+		return map[string]any{"type": "string"}
+	case bool:
+		return map[string]any{"type": "boolean"}
+	case float64:
+		if x == float64(int64(x)) {
+			return map[string]any{"type": "integer"}
+		}
+		return map[string]any{"type": "number"}
+	case int, int64:
+		return map[string]any{"type": "integer"}
+	}
+	return map[string]any{} // null: type unknown
+}
+
+// mergeSchemas unions two example-derived schemas (array elements differ in keys).
+func mergeSchemas(a, b map[string]any) map[string]any {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	if a["type"] != b["type"] {
+		if a["type"] == nil {
+			return b
+		}
+		return a
+	}
+	switch a["type"] {
+	case "object":
+		pa, pb := obj(a["properties"]), obj(b["properties"])
+		out := map[string]any{}
+		for k, v := range pa {
+			out[k] = v
+		}
+		for k, v := range pb {
+			out[k] = mergeSchemas(obj(out[k]), obj(v))
+		}
+		return map[string]any{"type": "object", "properties": out}
+	case "array":
+		return map[string]any{"type": "array", "items": mergeSchemas(obj(a["items"]), obj(b["items"]))}
+	}
+	return a
+}
+
+// queryKeyNames: query parameters that can only be a credential.
+var queryKeyNames = map[string]bool{"key": true, "api_key": true, "apikey": true, "api-key": true, "access_key": true, "access_token": true, "auth_token": true}
+
+// queryKeyScheme: a spec that declares no security but lists a credential as
+// an ordinary query parameter (Shodan: "key" on every operation) really means
+// an apiKey-in-query scheme. Make that explicit, and take the parameter out of
+// the operation's normal parameters so it can never go into request.params.
+func (s *apiSpec) queryKeyScheme(op *specOp) {
+	if op.secDeclared && len(op.security) > 0 {
+		return
+	}
+	for i, p := range op.params {
+		if p.in != "query" || !queryKeyNames[strings.ToLower(p.name)] {
+			continue
+		}
+		name := "query_" + p.name
+		if s.schemes == nil {
+			s.schemes = map[string]any{}
+		}
+		if _, ok := s.schemes[name]; !ok {
+			s.schemes[name] = map[string]any{"type": "apiKey", "in": "query", "name": p.name, "x-derived": true,
+				"description": "not a declared security scheme: the spec lists " + p.name + " as a query parameter (" + trunc(compact(p.desc), 200) + ")"}
+		}
+		op.security, op.secDeclared = []map[string]any{{name: []any{}}}, true
+		op.params = append(op.params[:i:i], op.params[i+1:]...)
+		return
+	}
 }
 
 // serverVariants: the server as written, with its path variables set to the
@@ -510,10 +638,12 @@ func (s *apiSpec) catalog() (string, map[string]*specOp) {
 // noAuth when the spec says the operation needs none.
 func (s *apiSpec) allowedSchemes(op *specOp) (names []string, noAuth bool) {
 	if !op.secDeclared {
-		if len(s.schemes) == 0 {
-			return nil, true
+		for _, n := range sortedKeys(s.schemes) {
+			if obj(s.schemes[n])["x-derived"] != true { // derived ones belong only to ops listing that parameter
+				names = append(names, n)
+			}
 		}
-		return sortedKeys(s.schemes), false
+		return names, len(names) == 0
 	}
 	if len(op.security) == 0 {
 		return nil, true
@@ -579,6 +709,9 @@ func (s *apiSpec) describeScheme(name string) string {
 func (s *apiSpec) excerpt(op *specOp) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "OPENAPI SPEC %s (%s)\nSERVERS: %s\nOPERATION: %s\nSUMMARY: %s\n", s.url, s.version, strings.Join(s.servers, " , "), op.key, op.summary)
+	if op.fromExample {
+		b.WriteString("RESPONSE SHAPE: the spec declares no response schema; fields below come from the spec's own response example.\n")
+	}
 	if op.desc != "" {
 		fmt.Fprintf(&b, "DESCRIPTION: %s\n", trunc(compact(op.desc), 1500))
 	}
@@ -862,6 +995,8 @@ func (s *apiSpec) authMatches(op *specOp, a engine.Auth) (string, bool) {
 		t, scheme := str(sc["type"]), strings.ToLower(str(sc["scheme"]))
 		ok := false
 		switch {
+		case t == "apiKey" && str(sc["in"]) == "query":
+			ok = a.Type == "api_key" && a.Header == "" && a.Param == str(sc["name"])
 		case t == "apiKey" && str(sc["in"]) == "header":
 			h := str(sc["name"])
 			ok = a.Type == "api_key" && strings.EqualFold(a.Header, h)
@@ -897,21 +1032,20 @@ func (s *apiSpec) authMatches(op *specOp, a engine.Auth) (string, bool) {
 
 var secretRef = regexp.MustCompile(`\{\{\s*secret\.[a-zA-Z0-9_]+\s*\}\}`)
 
-func contains(list []string, v string) bool {
-	for _, x := range list {
-		if x == v {
-			return true
-		}
+// readSpec downloads one public spec file through the agent (FetchSpec in tests).
+func (c *Client) readSpec(ctx context.Context, raw string) (string, error) {
+	if c.FetchSpec != nil {
+		return c.FetchSpec(ctx, raw)
 	}
-	return false
-}
-
-func readPublicSpec(ctx context.Context, raw string) (string, error) {
 	if !publicDocURL(raw) {
 		return "", ErrDocumentation
 	}
-	u, _ := url.Parse(raw)
-	u.Fragment = ""
-	b, _, e := fetchPublic(ctx, u, "application/json, application/yaml, text/yaml, text/plain", maxSpecBytes)
-	return string(b), e
+	if c.Agent == nil {
+		return "", fmt.Errorf("%w: documentation agent (CB_AGENT_URL) not configured", ErrDocumentation)
+	}
+	text, e := c.Agent.Raw(ctx, raw, maxSpecBytes)
+	if e != nil {
+		return "", fmt.Errorf("%w: %s", ErrDocumentation, trunc(e.Error(), 200))
+	}
+	return text, nil
 }

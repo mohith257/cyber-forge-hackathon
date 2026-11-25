@@ -40,8 +40,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 201',()=>pm.response.to.have.status(201));",
-                  "if(pm.response.code===201){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                  "pm.test('Saved (201 new, 200 unchanged)',()=>pm.expect(pm.response.code).to.be.oneOf([200,201]));",
+                  "if([200,201].includes(pm.response.code)){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
                 ]
               }
             }
@@ -293,7 +293,7 @@
     },
     {
       "name": "Live sources (OCSF)",
-      "description": "Real free-tier sources stored as OCSF 1.9.0. Each Submit sets {{connector}}; then run Validate / Activate / Test / Run from 'Core API flow', then the records request here. GitHub needs the github_token secret stored first (see configs/README.md).",
+      "description": "Real free-tier sources stored as OCSF 1.9.0. KEV requests run save -> validate -> activate -> run -> read on their own. GitHub needs the github_token secret stored first (see configs/README.md).",
       "item": [
         {
           "name": "Submit CISA KEV (live)",
@@ -317,8 +317,75 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 201',()=>pm.response.to.have.status(201));",
-                  "if(pm.response.code===201){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                  "pm.test('Saved (201 new, 200 unchanged)',()=>pm.expect(pm.response.code).to.be.oneOf([200,201]));",
+                  "if([200,201].includes(pm.response.code)){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Validate CISA KEV",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/configs/{{connector}}/validate"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Valid config',()=>{pm.response.to.have.status(200);pm.expect(pm.response.json().errors).to.be.empty;});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Activate CISA KEV",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/configs/{{connector}}/activate",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"revision\":{{revision}}}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Activated',()=>{pm.response.to.have.status(200);pm.expect(pm.response.json().status).to.eql('live');});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Run CISA KEV (live fetch)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/connectors/{{connector}}/run"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Run succeeded',()=>{pm.response.to.have.status(200);pm.expect(pm.response.json().outcome).to.eql('success');});",
+                  "pm.test('Fetched and accepted records',()=>{const r=pm.response.json();pm.expect(r.accepted).to.be.above(0);console.log(`received=${r.received} accepted=${r.accepted} quarantined=${r.quarantined}`);});"
                 ]
               }
             }
@@ -356,7 +423,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 200',()=>pm.response.to.have.status(200));"
+                  "pm.test('Expected HTTP 200',()=>pm.response.to.have.status(200));",
+                  "pm.test('Returns OCSF Vulnerability Findings',()=>{const d=pm.response.json();pm.expect(d).to.be.an('array').that.is.not.empty;pm.expect(d[0].class_name).to.eql('Vulnerability Finding');pm.expect(d[0].finding_info.uid).to.match(/^CVE-/);});"
                 ]
               }
             }
@@ -384,8 +452,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 201',()=>pm.response.to.have.status(201));",
-                  "if(pm.response.code===201){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                  "pm.test('Saved (201 new, 200 unchanged)',()=>pm.expect(pm.response.code).to.be.oneOf([200,201]));",
+                  "if([200,201].includes(pm.response.code)){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
                 ]
               }
             }
@@ -451,8 +519,75 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 201',()=>pm.response.to.have.status(201));",
-                  "if(pm.response.code===201){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                  "pm.test('Saved (201 new, 200 unchanged)',()=>pm.expect(pm.response.code).to.be.oneOf([200,201]));",
+                  "if([200,201].includes(pm.response.code)){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Validate KEV ransomware filter",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/configs/{{connector}}/validate"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Valid config',()=>{pm.response.to.have.status(200);pm.expect(pm.response.json().errors).to.be.empty;});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Activate KEV ransomware filter",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/configs/{{connector}}/activate",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"revision\":{{revision}}}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Activated',()=>{pm.response.to.have.status(200);pm.expect(pm.response.json().status).to.eql('live');});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Run KEV ransomware filter (live fetch)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/connectors/{{connector}}/run"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Run succeeded',()=>{pm.response.to.have.status(200);pm.expect(pm.response.json().outcome).to.eql('success');});",
+                  "pm.test('Fetched and accepted records',()=>{const r=pm.response.json();pm.expect(r.accepted).to.be.above(0);console.log(`received=${r.received} accepted=${r.accepted} quarantined=${r.quarantined}`);});"
                 ]
               }
             }
@@ -490,7 +625,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 200',()=>pm.response.to.have.status(200));"
+                  "pm.test('Expected HTTP 200',()=>pm.response.to.have.status(200));",
+                  "pm.test('Returns OCSF Vulnerability Findings',()=>{const d=pm.response.json();pm.expect(d).to.be.an('array').that.is.not.empty;pm.expect(d[0].class_name).to.eql('Vulnerability Finding');pm.expect(d[0].finding_info.uid).to.match(/^CVE-/);});"
                 ]
               }
             }
@@ -523,8 +659,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 201',()=>pm.response.to.have.status(201));",
-                  "if(pm.response.code===201){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                  "pm.test('Saved (201 new, 200 unchanged)',()=>pm.expect(pm.response.code).to.be.oneOf([200,201]));",
+                  "if([200,201].includes(pm.response.code)){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
                 ]
               }
             }
@@ -599,8 +735,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 201',()=>pm.response.to.have.status(201));",
-                  "if(pm.response.code===201){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                  "pm.test('Saved (201 new, 200 unchanged)',()=>pm.expect(pm.response.code).to.be.oneOf([200,201]));",
+                  "if([200,201].includes(pm.response.code)){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
                 ]
               }
             }
@@ -675,8 +811,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 201',()=>pm.response.to.have.status(201));",
-                  "if(pm.response.code===201){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                  "pm.test('Saved (201 new, 200 unchanged)',()=>pm.expect(pm.response.code).to.be.oneOf([200,201]));",
+                  "if([200,201].includes(pm.response.code)){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
                 ]
               }
             }
@@ -751,8 +887,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 201',()=>pm.response.to.have.status(201));",
-                  "if(pm.response.code===201){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                  "pm.test('Saved (201 new, 200 unchanged)',()=>pm.expect(pm.response.code).to.be.oneOf([200,201]));",
+                  "if([200,201].includes(pm.response.code)){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
                 ]
               }
             }
@@ -827,8 +963,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 201',()=>pm.response.to.have.status(201));",
-                  "if(pm.response.code===201){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                  "pm.test('Saved (201 new, 200 unchanged)',()=>pm.expect(pm.response.code).to.be.oneOf([200,201]));",
+                  "if([200,201].includes(pm.response.code)){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
                 ]
               }
             }
@@ -903,8 +1039,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 201',()=>pm.response.to.have.status(201));",
-                  "if(pm.response.code===201){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                  "pm.test('Saved (201 new, 200 unchanged)',()=>pm.expect(pm.response.code).to.be.oneOf([200,201]));",
+                  "if([200,201].includes(pm.response.code)){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
                 ]
               }
             }
@@ -979,8 +1115,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Expected HTTP 201',()=>pm.response.to.have.status(201));",
-                  "if(pm.response.code===201){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
+                  "pm.test('Saved (201 new, 200 unchanged)',()=>pm.expect(pm.response.code).to.be.oneOf([200,201]));",
+                  "if([200,201].includes(pm.response.code)){const s=pm.response.json();pm.environment.set('connector',s.id);pm.environment.set('revision',s.revision);}"
                 ]
               }
             }

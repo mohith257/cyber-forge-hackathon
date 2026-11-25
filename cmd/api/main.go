@@ -1,6 +1,7 @@
 package main
 
 import (
+	"configbridge/internal/agent"
 	"configbridge/internal/ai"
 	"configbridge/internal/api"
 	"configbridge/internal/app"
@@ -13,6 +14,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
@@ -152,20 +154,14 @@ func run() error {
 		}
 		drafter.DailyLimit, drafter.TokenLimit = limit, tokens
 		drafter.Resolve = ai.LookupDNS
-		// Headless renderer for JavaScript-only docs pages: its own container,
-		// or "off". Required explicitly so the choice is visible in .env.
-		switch renderer := os.Getenv("CB_DOC_RENDERER"); renderer {
-		case "":
-			return errors.New("CB_AI_PROVIDER set: CB_DOC_RENDERER is required (the renderer's DevTools URL, e.g. http://renderer:9222, or off)")
-		case "off":
-		default:
-			render, err := ai.NewRenderer(renderer)
-			if err != nil {
-				return err
-			}
-			drafter.Render = render
-			slog.Info("docs renderer", "enabled", true)
+		// Rust retrieval agent (agent/): reads every public docs page. Required:
+		// the API process itself never parses arbitrary web pages.
+		docs, err := agent.New(os.Getenv("CB_AGENT_URL"), os.Getenv("CB_AGENT_TOKEN"))
+		if err != nil {
+			return fmt.Errorf("CB_AI_PROVIDER set: %w", err)
 		}
+		drafter.Agent = docs
+		slog.Info("docs agent", "url", os.Getenv("CB_AGENT_URL"))
 	}
 	// "*" = every account (spend still bounded by the daily request/token budget)
 	if raw := strings.TrimSpace(os.Getenv("CB_AI_ENABLED_TENANTS")); raw != "" && raw != "*" {
